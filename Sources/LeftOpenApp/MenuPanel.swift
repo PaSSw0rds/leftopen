@@ -1391,6 +1391,11 @@ struct DoorMark: View {
     /// instead of painted, so macOS can tint the mark for light and dark menu bars.
     var isTemplate = false
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var motion: Animation {
+        reduceMotion ? .easeInOut(duration: 0.12) : .spring(response: 0.4, dampingFraction: 0.78)
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -1422,6 +1427,7 @@ struct DoorMark: View {
                         p.closeSubpath()
                     }
                     .fill(darkColor)
+                    .transition(.opacity)
 
                     // Layer 2: door leaf (swung open)
                     Path { p in
@@ -1442,17 +1448,7 @@ struct DoorMark: View {
                     }
                     .fill(isTemplate ? Color.black : leafColor)
                     .blendMode(isTemplate ? .destinationOut : .normal)
-
-                    // Layer 3: door-knob
-                    Path { p in
-                        p.addEllipse(in: CGRect(
-                            x: (13.552 - 1.644) * sx,
-                            y: (29.134 - 1.644) * sy,
-                            width: 2 * 1.644 * sx,
-                            height: 2 * 1.644 * sy
-                        ))
-                    }
-                    .fill(darkColor)
+                    .transition(.opacity)
                 } else {
                     // Closed Door: interior is filled flush by door leaf
                     Path { p in
@@ -1473,18 +1469,16 @@ struct DoorMark: View {
                     }
                     .fill(isTemplate ? Color.black : leafColor)
                     .blendMode(isTemplate ? .destinationOut : .normal)
-
-                    // Door knob on closed door (right side)
-                    Path { p in
-                        p.addEllipse(in: CGRect(
-                            x: (24.0 - 1.644) * sx,
-                            y: (29.134 - 1.644) * sy,
-                            width: 2 * 1.644 * sx,
-                            height: 2 * 1.644 * sy
-                        ))
-                    }
-                    .fill(darkColor)
+                    .transition(.opacity)
                 }
+
+                // Layer 3: door-knob, perspective shift: moves left and grows as door closes
+                let knobRadius = isOpen ? 1.644 : 1.8
+                let knobX = isOpen ? 13.552 : 10.5
+                Circle()
+                    .fill(darkColor)
+                    .frame(width: 2 * knobRadius * sx, height: 2 * knobRadius * sy)
+                    .position(x: knobX * sx, y: 29.134 * sy)
 
                 // Layer 4: door-outline (frame)
                 Path { p in
@@ -1544,6 +1538,7 @@ struct DoorMark: View {
                 }
             }
             .compositingGroup()
+            .animation(motion, value: isOpen)
         }
         .aspectRatio(33.0 / 55.0, contentMode: .fit)
     }

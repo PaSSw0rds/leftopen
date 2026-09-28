@@ -61,6 +61,18 @@ struct SettingsView: View {
             Section {
                 Toggle(L("Protect apps and system services", "保护 App 和系统服务"),
                        isOn: $settings.safetyProtectionEnabled.animation(motion))
+                Toggle(L("Play a sound when a port closes", "关闭端口时播放提示音"),
+                       isOn: $settings.soundEffectsEnabled)
+                HStack {
+                    Spacer()
+                    Button(action: previewClose) {
+                        Label(L("Test Sound & Motion", "测试音效与动画"), systemImage: "play.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(L("Preview the sound and door animation used when a port closes",
+                            "预览关闭端口时使用的音效和门的开合动画"))
+                }
             } header: {
                 sectionHeader(L("Closing Safety", "关闭安全保护"), help: settings.safetyProtectionEnabled
                     ? L("Prevents closing app-owned, macOS, and automatically restarted service ports. Project servers remain closable.",
@@ -255,6 +267,17 @@ struct SettingsView: View {
         .padding(.trailing, 5)
         .padding(.vertical, 3)
         .background(Color.primary.opacity(0.07), in: Capsule())
+    }
+
+    /// Replays the exact feedback a real close gives — same sound, same door swing — so sound
+    /// and motion can be tuned without going and actually closing a port.
+    private func previewClose() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen = false }
+        CloseEffect.playSound()
+        Task {
+            try? await Task.sleep(for: .seconds(1.1))
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen = true }
+        }
     }
 
     private func addPort() {

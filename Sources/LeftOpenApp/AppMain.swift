@@ -147,6 +147,12 @@ final class MenuModel: ObservableObject {
         }
     }
 
+    /// A door latch, for the "the door shut" moment. Silent when the user has turned sound
+    /// effects off, or when the close didn't actually free the port.
+    private func playCloseSound() {
+        CloseEffect.playSound()
+    }
+
     /// Success notices fade on their own; warnings and errors stay until the next action.
     private func post(_ notice: Notice) {
         self.notice = notice
@@ -251,6 +257,7 @@ final class MenuModel: ObservableObject {
             if result.portFree {
                 outcome = L("Port \(plan.port) is free.", "端口 \(plan.port) 已释放。")
                 kind = .success
+                playCloseSound()
             } else if result.targetStoppedListening {
                 let holders = result.remainingPIDs.map(String.init).joined(separator: ", ")
                 outcome = L("PID \(plan.pid) stopped listening; port \(plan.port) is now held by \(holders).",
@@ -309,9 +316,11 @@ final class MenuModel: ObservableObject {
             selectedActivityID = nil
             await refresh()
             if result.isAllSuccessful {
+                playCloseSound()
                 post(Notice(kind: .success, text: L("Closed \(result.successfulPlans.count) project server\(result.successfulPlans.count == 1 ? "" : "s").",
                                                     "已关闭 \(result.successfulPlans.count) 个项目服务器。")))
             } else {
+                if !result.successfulPlans.isEmpty { playCloseSound() }
                 post(Notice(kind: .warning, text: L("Closed \(result.successfulPlans.count) of \(result.totalCount) servers. \(result.failedPlans.count) could not be closed.",
                                                     "已关闭 \(result.successfulPlans.count)/\(result.totalCount) 个服务器，\(result.failedPlans.count) 个未能关闭。")))
             }

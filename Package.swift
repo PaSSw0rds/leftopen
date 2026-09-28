@@ -12,7 +12,8 @@ let package = Package(
     targets: [
         .target(name: "LeftOpenCore", path: "Sources/LeftOpenCore"),
         .executableTarget(name: "LeftOpenApp", dependencies: ["LeftOpenCore"], path: "Sources/LeftOpenApp",
-                          resources: [.copy("Resources/FranklinSignature.svg"), .copy("Resources/GitHubMark.svg")]),
+                          resources: [.copy("Resources/FranklinSignature.svg"), .copy("Resources/GitHubMark.svg"),
+                                      .copy("Resources/DoorClose.aiff")]),
         .executableTarget(name: "LeftOpenCLI", dependencies: ["LeftOpenCore"], path: "Sources/LeftOpenCLI"),
         .testTarget(name: "LeftOpenCoreTests", dependencies: ["LeftOpenCore"], path: "Tests/LeftOpenCoreTests"),
     ]

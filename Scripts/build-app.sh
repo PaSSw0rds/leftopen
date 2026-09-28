@@ -35,9 +35,13 @@ if [[ -f "${project_dir}/Resources/AppIcon.icns" ]]; then
   mkdir -p "${app_path}/Contents/Resources"
   cp "${project_dir}/Resources/AppIcon.icns" "${app_path}/Contents/Resources/AppIcon.icns"
 fi
-if [[ -f "${project_dir}/Sources/LeftOpenApp/Resources/FranklinSignature.svg" ]]; then
+resource_bundle="${binary_dir}/LeftOpen_LeftOpenApp.bundle"
+if [[ -d "$resource_bundle" ]]; then
   mkdir -p "${app_path}/Contents/Resources"
-  cp "${project_dir}/Sources/LeftOpenApp/Resources/FranklinSignature.svg" "${app_path}/Contents/Resources/FranklinSignature.svg"
+  cp -R "$resource_bundle" "${app_path}/Contents/Resources/LeftOpen_LeftOpenApp.bundle"
+else
+  print -u2 "Missing generated resource bundle: ${resource_bundle}"
+  exit 1
 fi
 plutil -replace CFBundleIdentifier -string "$bundle_id" "${app_path}/Contents/Info.plist"
 # Sign nested code before the bundle, which signs the main executable too.
