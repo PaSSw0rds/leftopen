@@ -78,6 +78,7 @@ public final class AppSettings: ObservableObject {
         static let checkForUpdates = "leftopen.checkForUpdates"
         static let safetyProtectionEnabled = "leftopen.safetyProtectionEnabled"
         static let soundEffectsEnabled = "leftopen.soundEffectsEnabled"
+        static let soundVolume = "leftopen.soundVolume"
     }
 
     private let defaults = UserDefaults.standard
@@ -106,6 +107,10 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(soundEffectsEnabled, forKey: Keys.soundEffectsEnabled) }
     }
 
+    @Published public var soundVolume: Double {
+        didSet { defaults.set(soundVolume, forKey: Keys.soundVolume) }
+    }
+
     /// Applied before observers hear about it, so every view re-renders in the new language.
     @Published public var language: LanguagePreference {
         willSet { Localization.current = newValue.resolved }
@@ -126,6 +131,8 @@ public final class AppSettings: ObservableObject {
         self.safetyProtectionEnabled = defaults.object(forKey: Keys.safetyProtectionEnabled) as? Bool ?? true
 
         self.soundEffectsEnabled = defaults.object(forKey: Keys.soundEffectsEnabled) as? Bool ?? true
+
+        self.soundVolume = defaults.object(forKey: Keys.soundVolume) as? Double ?? 1.0
 
         let storedLanguage = defaults.string(forKey: Keys.language) ?? LanguagePreference.system.rawValue
         self.language = LanguagePreference(rawValue: storedLanguage) ?? .system

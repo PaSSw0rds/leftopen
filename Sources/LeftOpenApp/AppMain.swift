@@ -82,6 +82,7 @@ final class MenuModel: ObservableObject {
     private var settingsObserver: AnyCancellable?
     private var languageObserver: AnyCancellable?
     private var safetyProtectionObserver: AnyCancellable?
+    private var previousClosablePortCount = 0
 
     /// The scan minus ports the user chose to ignore, so every count agrees with the list.
     var visible: ScanSnapshot {
@@ -189,6 +190,11 @@ final class MenuModel: ObservableObject {
                 snapshot = try await Task.detached(priority: .utility) { try Scanner.scan() }.value
                 lastRefresh = Date()
                 notice = nil
+                // Play open sound when closable ports increase
+                if closablePortCount > previousClosablePortCount {
+                    DoorSound.doorOpen.play()
+                }
+                previousClosablePortCount = closablePortCount
             } catch {
                 post(Notice(kind: .error, text: L("Scan failed: \(error.localizedDescription)", "扫描失败：\(error.localizedDescription)")))
             }

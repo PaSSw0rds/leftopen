@@ -11,6 +11,8 @@ struct SettingsView: View {
     @State private var newPort = ""
     @State private var didCopy = false
     @State private var doorOpen = true
+    @State private var volumePreviewTask: Task<Void, Never>?
+    @State private var previewSoundToggle = false
 
     private var motion: Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .snappy(duration: 0.28)
@@ -63,15 +65,25 @@ struct SettingsView: View {
                        isOn: $settings.safetyProtectionEnabled.animation(motion))
                 Toggle(L("Play a sound when a port closes", "关闭端口时播放提示音"),
                        isOn: $settings.soundEffectsEnabled)
-                HStack {
-                    Spacer()
-                    Button(action: previewClose) {
-                        Label(L("Test Sound & Motion", "测试音效与动画"), systemImage: "play.circle")
+                if settings.soundEffectsEnabled {
+                    HStack(spacing: 12) {
+                        Text(L("Volume", "音量")).frame(width: 50, alignment: .leading)
+                        Slider(value: $settings.soundVolume, in: 0...1, step: 0.1)
+                            .controlSize(.small)
+                            .onChange(of: settings.soundVolume) { _ in
+                                volumePreviewTask?.cancel()
+                                volumePreviewTask = Task {
+                                    try? await Task.sleep(for: .milliseconds(200))
+                                    guard !Task.isCancelled else { return }
+                                    previewSoundToggle.toggle()
+                                    if previewSoundToggle {
+                                        DoorSound.doorOpen.play()
+                                    } else {
+                                        DoorSound.doorClose.play()
+                                    }
+                                }
+                            }
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help(L("Preview the sound and door animation used when a port closes",
-                            "预览关闭端口时使用的音效和门的开合动画"))
                 }
             } header: {
                 sectionHeader(L("Closing Safety", "关闭安全保护"), help: settings.safetyProtectionEnabled
@@ -98,7 +110,9 @@ struct SettingsView: View {
                             .frame(width: 20, height: 33)
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                let wasOpen = doorOpen
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen.toggle() }
+                                if wasOpen { DoorSound.doorClose.play() } else { DoorSound.doorOpen.play() }
                             }
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
@@ -267,17 +281,6 @@ struct SettingsView: View {
         .padding(.trailing, 5)
         .padding(.vertical, 3)
         .background(Color.primary.opacity(0.07), in: Capsule())
-    }
-
-    /// Replays the exact feedback a real close gives — same sound, same door swing — so sound
-    /// and motion can be tuned without going and actually closing a port.
-    private func previewClose() {
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen = false }
-        CloseEffect.playSound()
-        Task {
-            try? await Task.sleep(for: .seconds(1.1))
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen = true }
-        }
     }
 
     private func addPort() {
