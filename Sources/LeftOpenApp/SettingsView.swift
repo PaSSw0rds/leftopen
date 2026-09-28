@@ -6,9 +6,15 @@ struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var launchAtLogin = LaunchAtLoginManager.shared
     @ObservedObject private var updates = UpdateChecker.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var newPort = ""
     @State private var didCopy = false
     @State private var doorOpen = true
+
+    private var motion: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .snappy(duration: 0.28)
+    }
 
     private var version: String {
         let info = Bundle.main.infoDictionary
@@ -48,52 +54,127 @@ struct SettingsView: View {
                 TextField(L("Add port", "添加端口"), text: $newPort, prompt: Text(L("e.g. 5432", "例如 5432")))
                     .onSubmit(addPort)
             } header: {
-                Text(L("Ignored Ports", "忽略的端口"))
-            } footer: {
-                footnote(L("Hidden from the list and counts. Search still finds them.", "不在列表和计数中显示，搜索时仍能找到。"))
+                sectionHeader(L("Ignored Ports", "忽略的端口"),
+                    help: L("Hidden from the list and counts. Search still finds them.", "不在列表和计数中显示，搜索时仍能找到。"))
+            }
+
+            Section {
+                Toggle(L("Protect apps and system services", "保护 App 和系统服务"),
+                       isOn: $settings.safetyProtectionEnabled.animation(motion))
+            } header: {
+                sectionHeader(L("Closing Safety", "关闭安全保护"), help: settings.safetyProtectionEnabled
+                    ? L("Prevents closing app-owned, macOS, and automatically restarted service ports. Project servers remain closable.",
+                        "阻止关闭属于 App、macOS 和会自动重启的服务端口；项目服务器仍可关闭。")
+                    : L("Protection is off. LeftOpen will let you try to close any port owned by your user. Process identity is still rechecked before SIGTERM.",
+                        "保护已关闭。LeftOpen 将允许尝试关闭当前用户的任何端口；发送 SIGTERM 前仍会重新确认进程身份。"))
             }
 
             Section {
                 Toggle(L("Check for updates automatically", "自动检查更新"), isOn: $settings.checkForUpdates)
                 updateStatus
+                    .animation(motion, value: updates.state)
             } header: {
-                Text(L("Updates", "更新"))
-            } footer: {
-                footnote(L("Asks GitHub for the latest release once a day. Nothing about this Mac is sent.",
-                           "每天向 GitHub 查询一次最新版本，不会发送这台 Mac 的任何信息。"))
+                sectionHeader(L("Updates", "更新"),
+                    help: L("Asks GitHub for the latest release once a day. Nothing about this Mac is sent.",
+                            "每天向 GitHub 查询一次最新版本，不会发送这台 Mac 的任何信息。"))
             }
 
             Section {
-                HStack(spacing: 12) {
-                    DoorMark(isOpen: doorOpen)
-                        .frame(width: 20, height: 33)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen.toggle() }
+                VStack(alignment: .trailing, spacing: 8) {
+                    HStack(spacing: 12) {
+                        DoorMark(isOpen: doorOpen)
+                            .frame(width: 20, height: 33)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { doorOpen.toggle() }
+                            }
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("LeftOpen")
+                                .font(.headline)
+                            Text(version)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("LeftOpen").font(.headline)
-                        Text(version).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        footerLink(systemImage: "globe", url: "https://songhaifan.github.io/leftopen/",
+                                   label: L("Website", "官网"))
+                        githubLink
                     }
-                    Spacer()
-                    Link(L("Website", "官网"), destination: URL(string: "https://songhaifan.github.io/leftopen/")!)
-                    Link("GitHub", destination: URL(string: "https://github.com/SonghaiFan/leftopen")!)
+                    HStack(alignment: .lastTextBaseline, spacing: 12) {
+                        Text(L("Gently close the doors left ajar.", "轻轻关上那些虚掩的门。"))
+                            .font(.caption)
+                            .italic()
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        signature
+                    }
                 }
-                .font(.callout)
+                .padding(.vertical, 2)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .scrollContentBackground(.hidden)
+        .background(panelSurface(colorScheme))
+        .controlSize(.small)
+        .frame(width: 380)
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// Parsed as Markdown so `code` spans render.
-    private func footnote(_ text: String) -> some View {
-        Text(LocalizedStringKey(text))
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+    /// A section title that carries its explanation as a hover tooltip instead of standing
+    /// footer text, so the form reads at a glance and the detail is there when wanted.
+    private func sectionHeader(_ title: String, help: String) -> some View {
+        Text(title)
+            .help(LocalizedStringKey(help))
+            .accessibilityHint(help)
+    }
+
+    private func footerLink(systemImage: String, url: String, label: String) -> some View {
+        Link(destination: URL(string: url)!) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .medium))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(label)
+        .accessibilityLabel(label)
+    }
+
+    @ViewBuilder
+    private var githubLink: some View {
+        let star = L("Star LeftOpen on GitHub", "在 GitHub 上给 LeftOpen 点个 Star")
+        Link(destination: URL(string: "https://github.com/SonghaiFan/leftopen")!) {
+            if let url = Bundle.module.url(forResource: "GitHubMark", withExtension: "svg"),
+               let image = NSImage(contentsOf: url) {
+                Image(nsImage: image)
+                    .resizable()
+                    .renderingMode(.template)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 13, height: 13)
+            } else {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 13, weight: .medium))
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(star)
+        .accessibilityLabel(star)
+    }
+
+    @ViewBuilder
+    private var signature: some View {
+        if let url = Bundle.module.url(forResource: "FranklinSignature", withExtension: "svg"),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .renderingMode(.template)
+                .aspectRatio(contentMode: .fit)
+                .foregroundStyle(.secondary)
+                .frame(width: 66, height: 20)
+                .opacity(0.35)
+                .accessibilityLabel(L("Franklin signature", "Franklin 签名"))
+        }
     }
 
     @ViewBuilder

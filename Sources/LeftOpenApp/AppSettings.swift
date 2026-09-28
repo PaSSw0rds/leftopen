@@ -76,6 +76,7 @@ public final class AppSettings: ObservableObject {
         static let ignoredPorts = "leftopen.ignoredPorts"
         static let language = "leftopen.language"
         static let checkForUpdates = "leftopen.checkForUpdates"
+        static let safetyProtectionEnabled = "leftopen.safetyProtectionEnabled"
     }
 
     private let defaults = UserDefaults.standard
@@ -96,6 +97,10 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(checkForUpdates, forKey: Keys.checkForUpdates) }
     }
 
+    @Published public var safetyProtectionEnabled: Bool {
+        didSet { defaults.set(safetyProtectionEnabled, forKey: Keys.safetyProtectionEnabled) }
+    }
+
     /// Applied before observers hear about it, so every view re-renders in the new language.
     @Published public var language: LanguagePreference {
         willSet { Localization.current = newValue.resolved }
@@ -112,6 +117,8 @@ public final class AppSettings: ObservableObject {
         self.ignoredPorts = defaults.array(forKey: Keys.ignoredPorts) as? [Int] ?? []
 
         self.checkForUpdates = defaults.object(forKey: Keys.checkForUpdates) as? Bool ?? true
+
+        self.safetyProtectionEnabled = defaults.object(forKey: Keys.safetyProtectionEnabled) as? Bool ?? true
 
         let storedLanguage = defaults.string(forKey: Keys.language) ?? LanguagePreference.system.rawValue
         self.language = LanguagePreference(rawValue: storedLanguage) ?? .system

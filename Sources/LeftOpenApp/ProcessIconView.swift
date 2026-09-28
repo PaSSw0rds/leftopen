@@ -253,15 +253,21 @@ final class ProcessIconCache: ObservableObject {
 struct ProcessIconResolver {
     @MainActor
     static func resolve(for activity: Activity) -> ProcessIconType {
-        // Tier 1: Native macOS Application Bundle
-        if let bundlePath = activity.applicationBundle?.path, FileManager.default.fileExists(atPath: bundlePath) {
-            return .appBundle(path: bundlePath)
+        // Tier 1: The listener executable itself belongs to a native macOS app. An indirect
+        // parent app is only host evidence (for example ChatGPT/Codex launching a project server),
+        // so it must not replace a concrete project's own icon.
+        if let bundle = activity.applicationBundle, bundle.direct,
+           FileManager.default.fileExists(atPath: bundle.path) {
+            return .appBundle(path: bundle.path)
         }
-        if let execPath = activity.process.executablePath, let found = bundlePath(from: execPath), FileManager.default.fileExists(atPath: found) {
+        if let execPath = activity.process.executablePath,
+           let found = bundlePath(from: execPath),
+           FileManager.default.fileExists(atPath: found) {
             return .appBundle(path: found)
         }
 
         // Tier 2: Icon the project ships itself, else a framework symbol from its manifest.
+        // A symbol intentionally falls through to the live favicon probe in ProcessIconView.
         if let project = activity.projectMarker {
             if let cached = ProcessIconCache.shared.cachedDirectoryIcon(project.root) {
                 if let cached { return cached }
@@ -272,7 +278,19 @@ struct ProcessIconResolver {
             }
         }
 
-        // Tier 2b: Icon shipped inside the npm package a global CLI runs from (e.g. its bundled web UI).
+        // Tier 3: Favicon fetched from this exact live server (populated asynchronously).
+        if let fetched = ProcessIconCache.shared.dynamicFavicon(for: activity) {
+            return fetched
+        }
+
+        // A parent app remains the best evidence only when no concrete project owns the listener.
+        if activity.projectMarker == nil,
+           let bundlePath = activity.applicationBundle?.path,
+           FileManager.default.fileExists(atPath: bundlePath) {
+            return .appBundle(path: bundlePath)
+        }
+
+        // Tier 3b: Icon shipped inside the npm package a global CLI runs from (e.g. its bundled web UI).
         if let args = activity.process.arguments, let package = NodePackageLocator.locate(inArguments: args) {
             if let cached = ProcessIconCache.shared.cachedDirectoryIcon(package.directory) {
                 if let cached { return cached }
@@ -281,11 +299,6 @@ struct ProcessIconResolver {
                 ProcessIconCache.shared.setCachedDirectoryIcon(resolved, package.directory)
                 if let resolved { return resolved }
             }
-        }
-
-        // Tier 3: Favicon fetched from the live server (populated asynchronously by ProcessIconView).
-        if let fetched = ProcessIconCache.shared.dynamicFavicon(for: activity) {
-            return fetched
         }
 
         // Tier 4: Command & Executable Identification

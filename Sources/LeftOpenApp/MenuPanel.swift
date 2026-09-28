@@ -85,7 +85,11 @@ struct MenuPanel: View {
         let groups = listenerGroups(from: filteredActivities)
         return PortCategory.allCases.compactMap { category in
             let members = groups.filter { (categories[$0.primary.process.pid] ?? .other) == category }
-            let ordered = members.filter { $0.closeTarget != nil } + members.filter { $0.closeTarget == nil }
+            let ordered = members.filter {
+                $0.closeTarget(safetyProtectionEnabled: settings.safetyProtectionEnabled) != nil
+            } + members.filter {
+                $0.closeTarget(safetyProtectionEnabled: settings.safetyProtectionEnabled) == nil
+            }
             return ordered.isEmpty ? nil : (category, ordered)
         }
     }
@@ -93,7 +97,9 @@ struct MenuPanel: View {
     /// Sections with something to close start open; ones LeftOpen can only explain start folded.
     private func isExpanded(_ category: PortCategory, _ groups: [ListenerGroup]) -> Bool {
         if expandAllSections || !query.isEmpty { return true }
-        return sectionExpansion[category] ?? groups.contains { $0.closeTarget != nil }
+        return sectionExpansion[category] ?? groups.contains {
+            $0.closeTarget(safetyProtectionEnabled: settings.safetyProtectionEnabled) != nil
+        }
     }
 
     private func listenerGroups(from activities: [Activity]) -> [ListenerGroup] {
@@ -341,12 +347,26 @@ struct MenuPanel: View {
             Text(model.lastRefresh.map { L("Updated \($0.formatted(date: .omitted, time: .shortened))", "更新于 \($0.formatted(date: .omitted, time: .shortened))") } ?? L("Not yet scanned", "尚未扫描"))
                 .foregroundStyle(.secondary)
             Spacer()
-            Button(L("Settings…", "设置…")) { SettingsWindowController.shared.show() }
-                .keyboardShortcut(",", modifiers: .command)
-                .help(L("Settings (⌘,)", "设置 (⌘,)"))
-            Button(L("Quit", "退出")) { NSApp.terminate(nil) }
-                .keyboardShortcut("q", modifiers: .command)
-                .help(L("Quit LeftOpen (⌘Q)", "退出 LeftOpen (⌘Q)"))
+            Button {
+                SettingsWindowController.shared.show()
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 18, height: 18)
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            .help(L("Settings (⌘,)", "设置 (⌘,)"))
+            .accessibilityLabel(L("Settings", "设置"))
+            Button {
+                NSApp.terminate(nil)
+            } label: {
+                Image(systemName: "power")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 18, height: 18)
+            }
+            .keyboardShortcut("q", modifiers: .command)
+            .help(L("Quit LeftOpen (⌘Q)", "退出 LeftOpen (⌘Q)"))
+            .accessibilityLabel(L("Quit", "退出"))
         }
         .buttonStyle(QuietButtonStyle())
         .quietFocus()
@@ -486,7 +506,8 @@ struct MenuPanel: View {
 
     private func groupRows(_ groups: [ListenerGroup]) -> some View {
         ForEach(groups) { group in
-            let closeTarget = group.closeTarget
+            let closeTarget = group.closeTarget(
+                safetyProtectionEnabled: settings.safetyProtectionEnabled)
             let foldable = group.activities.count > 1
             let expanded = foldable && expandedGroupIDs.contains(group.id)
             let revealed = foldable ? min(revealedCounts[group.id] ?? 0, group.activities.count) : 0
@@ -540,7 +561,8 @@ struct MenuPanel: View {
 
     /// A port row under its process header; process identity is inherited from the parent.
     private func listenerRow(_ activity: Activity) -> some View {
-        let closeTarget = CloseService.protectionReason(for: activity) == nil ? activity : nil
+        let closeTarget = CloseService.protectionReason(for: activity,
+            safetyProtectionEnabled: settings.safetyProtectionEnabled) == nil ? activity : nil
         return PortRow(
             port: activity.listener.port,
             icon: nil,
@@ -583,7 +605,8 @@ struct MenuPanel: View {
 
     private func portPage(_ activity: Activity) -> some View {
         let port = activity.listener.port
-        let protection = CloseService.protectionReason(for: activity)
+        let protection = CloseService.protectionReason(for: activity,
+            safetyProtectionEnabled: settings.safetyProtectionEnabled)
         let webURL = browserURL(for: activity)
         let folder = revealTarget(for: activity)
         return ScrollView {
@@ -877,7 +900,10 @@ struct MenuPanel: View {
             Button(L("Reveal in Finder", "在访达中显示")) { reveal(folder) }
         }
         let closable = activities
-            .filter { CloseService.protectionReason(for: $0) == nil }
+            .filter {
+                CloseService.protectionReason(for: $0,
+                    safetyProtectionEnabled: settings.safetyProtectionEnabled) == nil
+            }
             .sorted { $0.listener.port < $1.listener.port }
         if !closable.isEmpty {
             Divider()
@@ -916,8 +942,8 @@ private struct WebTarget: Identifiable {
     var id: String { activity.id }
 }
 
-/// The panel's surface colour, shared by the pages and the opaque row cards that sit on it.
-private func panelSurface(_ colorScheme: ColorScheme) -> Color {
+/// The panel's surface colour, shared by the pages, the opaque row cards, and Settings.
+func panelSurface(_ colorScheme: ColorScheme) -> Color {
     colorScheme == .dark ? Color(nsColor: .windowBackgroundColor) : Color(nsColor: .controlBackgroundColor)
 }
 
@@ -932,8 +958,9 @@ private struct ListenerGroup: Identifiable {
     var scope: ListenerScope { activities.contains { $0.scope == .lan } ? .lan : .local }
 
     /// What a swipe or ✕ closes: only offered when one closable PID owns every port in the row.
-    var closeTarget: Activity? {
-        pids.count == 1 && CloseService.protectionReason(for: primary) == nil ? primary : nil
+    func closeTarget(safetyProtectionEnabled: Bool) -> Activity? {
+        pids.count == 1 && CloseService.protectionReason(for: primary,
+            safetyProtectionEnabled: safetyProtectionEnabled) == nil ? primary : nil
     }
 
     var subtitle: String {

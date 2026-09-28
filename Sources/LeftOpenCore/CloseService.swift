@@ -10,6 +10,7 @@ public struct ClosePlan: Sendable, Identifiable {
     public let activity: Activity
     public let otherPorts: [Int]
     public let peerPIDs: [Int32]
+    public let safetyProtectionEnabled: Bool
 
     public var id: String { "\(port):\(pid)" }
 }
@@ -46,23 +47,28 @@ public struct CloseError: LocalizedError, Sendable {
 }
 
 public enum CloseService {
-    public static func protectionReason(for activity: Activity) -> String? {
+    public static func protectionReason(for activity: Activity,
+                                        safetyProtectionEnabled: Bool = true) -> String? {
         do {
-            try validate(activity: activity, currentUID: Int32(getuid()), currentPID: getpid())
+            try validate(activity: activity, currentUID: Int32(getuid()), currentPID: getpid(),
+                         safetyProtectionEnabled: safetyProtectionEnabled)
             return nil
         } catch {
             return error.localizedDescription
         }
     }
 
-    public static func prepare(port: Int, pid: Int32? = nil) throws -> ClosePlan {
+    public static func prepare(port: Int, pid: Int32? = nil,
+                               safetyProtectionEnabled: Bool = true) throws -> ClosePlan {
         let snapshot = try Scanner.scan()
         return try makePlan(activities: snapshot.activities, port: port, pid: pid,
-            currentUID: Int32(getuid()), currentPID: getpid(), startTime: processStartTime)
+            currentUID: Int32(getuid()), currentPID: getpid(), startTime: processStartTime,
+            safetyProtectionEnabled: safetyProtectionEnabled)
     }
 
     static func makePlan(activities: [Activity], port: Int, pid: Int32?, currentUID: Int32,
-                         currentPID: Int32, startTime: (Int32) -> String?) throws -> ClosePlan {
+                         currentPID: Int32, startTime: (Int32) -> String?,
+                         safetyProtectionEnabled: Bool = true) throws -> ClosePlan {
         let matches = activities.filter { $0.listener.port == port }
         guard !matches.isEmpty else { throw CloseError(L("Nothing is listening on port \(port).", "端口 \(port) 上没有进程在监听。")) }
         let pids = Array(Set(matches.map(\.process.pid))).sorted()
@@ -73,7 +79,8 @@ public enum CloseService {
         guard let activity = matches.first(where: { $0.process.pid == selectedPID }) else {
             throw CloseError(L("PID \(selectedPID) is not listening on port \(port).", "PID \(selectedPID) 没有在监听端口 \(port)。"))
         }
-        try validate(activity: activity, currentUID: currentUID, currentPID: currentPID)
+        try validate(activity: activity, currentUID: currentUID, currentPID: currentPID,
+                     safetyProtectionEnabled: safetyProtectionEnabled)
         guard let path = activity.process.executablePath, let uid = activity.process.uid else {
             throw CloseError(L("The process has insufficient verified identity; no signal will be sent.", "无法充分确认该进程的身份，不会发送信号。"))
         }
@@ -85,26 +92,31 @@ public enum CloseService {
         }.map(\.listener.port))).sorted()
         return ClosePlan(port: port, pid: selectedPID, uid: uid, executablePath: path,
             startTime: startTime, activity: activity, otherPorts: otherPorts,
-            peerPIDs: pids.filter { $0 != selectedPID })
+            peerPIDs: pids.filter { $0 != selectedPID },
+            safetyProtectionEnabled: safetyProtectionEnabled)
     }
 
-    private static func validate(activity: Activity, currentUID: Int32, currentPID: Int32) throws {
+    private static func validate(activity: Activity, currentUID: Int32, currentPID: Int32,
+                                 safetyProtectionEnabled: Bool) throws {
         let target = activity.process
         guard currentUID != 0 else { throw CloseError(L("Running Close as root is not supported.", "不支持以 root 身份关闭。")) }
         guard target.pid > 1 && target.pid != currentPID else { throw CloseError(L("PID \(target.pid) is protected.", "PID \(target.pid) 受保护。")) }
         guard let uid = target.uid else { throw CloseError(L("PID \(target.pid) has no verified user ID.", "无法确认 PID \(target.pid) 的用户。")) }
         guard uid == currentUID else { throw CloseError(L("PID \(target.pid) belongs to another user.", "PID \(target.pid) 属于其他用户。")) }
         guard let path = target.executablePath else { throw CloseError(L("PID \(target.pid) has no verified executable path.", "无法确认 PID \(target.pid) 的可执行文件路径。")) }
-        let protected = ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/"]
-        guard !protected.contains(where: { path.hasPrefix($0) }) else {
-            throw CloseError(L("PID \(target.pid) uses an operating-system executable; refusing to close it.", "PID \(target.pid) 是系统程序，拒绝关闭。"))
-        }
-        guard activity.applicationBundle == nil else {
-            throw CloseError(L("PID \(target.pid) belongs to an application bundle; refusing to disrupt the app.", "PID \(target.pid) 属于一个 App，为避免影响该 App，拒绝关闭。"))
-        }
-        if let job = activity.launchdJob, job.keepAlive {
-            throw CloseError(L("launchd keeps \(job.label) alive and would restart it at once. Stop it with `\(job.stopCommand)`.",
-                             "launchd 会让 \(job.label) 保持运行，关闭后会立即重启。请用 `\(job.stopCommand)` 停止它。"))
+        if safetyProtectionEnabled {
+            let protected = ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/"]
+            guard !protected.contains(where: { path.hasPrefix($0) }) else {
+                throw CloseError(L("PID \(target.pid) uses an operating-system executable; refusing to close it.", "PID \(target.pid) 是系统程序，拒绝关闭。"))
+            }
+            if let bundle = activity.applicationBundle,
+               bundle.direct || activity.projectMarker == nil {
+                throw CloseError(L("PID \(target.pid) belongs to an application bundle; refusing to disrupt the app.", "PID \(target.pid) 属于一个 App，为避免影响该 App，拒绝关闭。"))
+            }
+            if let job = activity.launchdJob, job.keepAlive {
+                throw CloseError(L("launchd keeps \(job.label) alive and would restart it at once. Stop it with `\(job.stopCommand)`.",
+                                 "launchd 会让 \(job.label) 保持运行，关闭后会立即重启。请用 `\(job.stopCommand)` 停止它。"))
+            }
         }
     }
 
@@ -122,7 +134,8 @@ public enum CloseService {
               activity.process.executablePath == plan.executablePath else {
             throw CloseError(L("PID \(plan.pid) changed identity since the preview; nothing was signalled.", "PID \(plan.pid) 在确认后身份已变化，未发送任何信号。"))
         }
-        try validate(activity: activity, currentUID: Int32(getuid()), currentPID: getpid())
+        try validate(activity: activity, currentUID: Int32(getuid()), currentPID: getpid(),
+                     safetyProtectionEnabled: plan.safetyProtectionEnabled)
     }
 
     public static func execute(_ plan: ClosePlan) throws -> CloseResult {
@@ -147,7 +160,8 @@ public enum CloseService {
             portFree: latest.isEmpty, remainingPIDs: Array(Set(latest.map(\.pid))).sorted())
     }
 
-    public static func prepareBatch(activities: [Activity]) throws -> [ClosePlan] {
+    public static func prepareBatch(activities: [Activity],
+                                    safetyProtectionEnabled: Bool = true) throws -> [ClosePlan] {
         let currentUID = Int32(getuid())
         let currentPID = getpid()
         var plans: [ClosePlan] = []
@@ -158,9 +172,12 @@ public enum CloseService {
             guard !processedPIDs.contains(pid) else { continue }
             processedPIDs.insert(pid)
 
-            guard protectionReason(for: activity) == nil else { continue }
+            guard protectionReason(for: activity,
+                                   safetyProtectionEnabled: safetyProtectionEnabled) == nil else { continue }
             guard let plan = try? makePlan(activities: activities, port: activity.listener.port, pid: pid,
-                                           currentUID: currentUID, currentPID: currentPID, startTime: processStartTime) else {
+                                           currentUID: currentUID, currentPID: currentPID,
+                                           startTime: processStartTime,
+                                           safetyProtectionEnabled: safetyProtectionEnabled) else {
                 continue
             }
             plans.append(plan)

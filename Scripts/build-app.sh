@@ -35,6 +35,10 @@ if [[ -f "${project_dir}/Resources/AppIcon.icns" ]]; then
   mkdir -p "${app_path}/Contents/Resources"
   cp "${project_dir}/Resources/AppIcon.icns" "${app_path}/Contents/Resources/AppIcon.icns"
 fi
+if [[ -f "${project_dir}/Sources/LeftOpenApp/Resources/FranklinSignature.svg" ]]; then
+  mkdir -p "${app_path}/Contents/Resources"
+  cp "${project_dir}/Sources/LeftOpenApp/Resources/FranklinSignature.svg" "${app_path}/Contents/Resources/FranklinSignature.svg"
+fi
 plutil -replace CFBundleIdentifier -string "$bundle_id" "${app_path}/Contents/Info.plist"
 # Sign nested code before the bundle, which signs the main executable too.
 codesign --force --sign - "${app_path}/Contents/MacOS/leftopen"

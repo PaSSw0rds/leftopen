@@ -81,6 +81,7 @@ final class MenuModel: ObservableObject {
     private var rescanRequested = false
     private var settingsObserver: AnyCancellable?
     private var languageObserver: AnyCancellable?
+    private var safetyProtectionObserver: AnyCancellable?
 
     /// The scan minus ports the user chose to ignore, so every count agrees with the list.
     var visible: ScanSnapshot {
@@ -96,8 +97,12 @@ final class MenuModel: ObservableObject {
 
     var portCount: Int { visible.portCount }
     var lanPortCount: Int { visible.lanPortCount }
-    var closablePortCount: Int { visible.closablePortCount }
-    var hasOpenDoors: Bool { visible.hasOpenDoors }
+    var closablePortCount: Int {
+        Set(visible.closableActivities(
+            safetyProtectionEnabled: AppSettings.shared.safetyProtectionEnabled
+        ).map(\.listener.port)).count
+    }
+    var hasOpenDoors: Bool { closablePortCount > 0 }
 
     init() {
         Task { await refresh() }
@@ -116,6 +121,15 @@ final class MenuModel: ObservableObject {
                 MainActor.assumeIsolated {
                     self?.notice = nil
                     Task { await self?.refresh() }
+                }
+            }
+        safetyProtectionObserver = AppSettings.shared.$safetyProtectionEnabled
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.pendingPlan = nil
+                    self?.pendingBatchPlans = nil
                 }
             }
     }
@@ -181,8 +195,10 @@ final class MenuModel: ObservableObject {
         defer { isPreparingClose = false }
         notice = nil
         do {
+            let safetyProtectionEnabled = AppSettings.shared.safetyProtectionEnabled
             pendingPlan = try await Task.detached(priority: .utility) {
-                try CloseService.prepare(port: activity.listener.port, pid: activity.process.pid)
+                try CloseService.prepare(port: activity.listener.port, pid: activity.process.pid,
+                    safetyProtectionEnabled: safetyProtectionEnabled)
             }.value
         } catch {
             post(Notice(kind: .warning, text: L("Close unavailable: \(error.localizedDescription)", "无法关闭：\(error.localizedDescription)")))
@@ -210,8 +226,10 @@ final class MenuModel: ObservableObject {
         }
         notice = nil
         do {
+            let safetyProtectionEnabled = AppSettings.shared.safetyProtectionEnabled
             let plan = try await Task.detached(priority: .utility) {
-                try CloseService.prepare(port: activity.listener.port, pid: activity.process.pid)
+                try CloseService.prepare(port: activity.listener.port, pid: activity.process.pid,
+                    safetyProtectionEnabled: safetyProtectionEnabled)
             }.value
             await execute(plan)
         } catch {
@@ -262,9 +280,12 @@ final class MenuModel: ObservableObject {
         defer { isPreparingBatchClose = false }
         notice = nil
         do {
-            let projects = visible.closableProjectActivities
+            let safetyProtectionEnabled = AppSettings.shared.safetyProtectionEnabled
+            let projects = visible.closableProjectActivities(
+                safetyProtectionEnabled: safetyProtectionEnabled)
             let plans = try await Task.detached(priority: .utility) {
-                try CloseService.prepareBatch(activities: projects)
+                try CloseService.prepareBatch(activities: projects,
+                    safetyProtectionEnabled: safetyProtectionEnabled)
             }.value
             if plans.isEmpty {
                 post(Notice(kind: .warning, text: L("No closable project servers found.", "没有可关闭的项目服务器。")))

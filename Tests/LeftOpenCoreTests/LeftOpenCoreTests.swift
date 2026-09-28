@@ -118,7 +118,7 @@ final class LeftOpenCoreTests: XCTestCase {
         let activity = fixtureActivity(pid: 42, path: "/opt/local/bin/node")
         let plan = ClosePlan(port: 3000, pid: 42, uid: Int32(getuid()),
             executablePath: "/opt/local/bin/node", startTime: "start one", activity: activity,
-            otherPorts: [], peerPIDs: [])
+            otherPorts: [], peerPIDs: [], safetyProtectionEnabled: true)
         XCTAssertThrowsError(try CloseService.verify(plan: plan, activities: [activity], freshStartTime: "start two"))
         XCTAssertThrowsError(try CloseService.verify(plan: plan,
             activities: [fixtureActivity(pid: 42, path: "/opt/local/bin/python")], freshStartTime: "start one"))
@@ -130,7 +130,7 @@ final class LeftOpenCoreTests: XCTestCase {
         let activity = fixtureActivity(pid: 42, path: "/opt/local/bin/node")
         let plan = ClosePlan(port: 3000, pid: 42, uid: Int32(getuid()),
             executablePath: "/opt/local/bin/node", startTime: "start one", activity: activity,
-            otherPorts: [], peerPIDs: [])
+            otherPorts: [], peerPIDs: [], safetyProtectionEnabled: true)
         XCTAssertThrowsError(try CloseService.verify(plan: plan,
             activities: [activity, fixtureActivity(pid: 43, path: "/opt/local/bin/node")],
             freshStartTime: "start one"))
@@ -193,6 +193,46 @@ final class LeftOpenCoreTests: XCTestCase {
             fixtureActivity(pid: 42, path: "/opt/local/bin/node", appBundle: true)))
         XCTAssertNotNil(CloseService.protectionReason(for:
             fixtureActivity(pid: 42, path: nil)))
+    }
+
+    func testSafetyProtectionCanBeDisabledWithoutSkippingIdentityChecks() throws {
+        let uid = Int32(getuid())
+        var keepAlive = fixtureActivity(pid: 42, path: "/opt/homebrew/bin/node")
+        keepAlive.launchdJob = LaunchdJob(label: "com.example.server", pid: 42, keepAlive: true)
+        let protectedActivities = [
+            fixtureActivity(pid: 42, path: "/usr/bin/python"),
+            fixtureActivity(pid: 42, path: "/opt/local/bin/node", appBundle: true),
+            keepAlive,
+        ]
+        for activity in protectedActivities {
+            XCTAssertNotNil(CloseService.protectionReason(for: activity))
+            XCTAssertNil(CloseService.protectionReason(for: activity,
+                safetyProtectionEnabled: false))
+            XCTAssertNoThrow(try CloseService.makePlan(activities: [activity], port: 3000,
+                pid: nil, currentUID: uid, currentPID: 99, startTime: { _ in "start one" },
+                safetyProtectionEnabled: false))
+        }
+
+        XCTAssertNotNil(CloseService.protectionReason(for:
+            fixtureActivity(pid: 42, path: nil), safetyProtectionEnabled: false))
+        XCTAssertNotNil(CloseService.protectionReason(for:
+            fixtureActivity(pid: 42, path: "/opt/local/bin/node", uid: uid + 1),
+            safetyProtectionEnabled: false))
+    }
+
+    func testIndirectAppParentDoesNotOverrideConcreteProject() {
+        let project = ProjectMarker(name: "token-flow", root: "/private/tmp/project",
+            source: ".git", markerPath: "/private/tmp/project/.git")
+        let bundle = ApplicationBundle(name: "Codex", path: "/Applications/Codex.app",
+            sourcePID: 99, direct: false)
+        let base = fixtureActivity(pid: 42, path: "/opt/homebrew/bin/python3.13")
+        let activity = Activity(listener: base.listener, process: base.process, parentChain: [],
+            projectMarker: project, applicationBundle: bundle, scope: .local,
+            inference: OwnerInference(label: "token-flow", category: .project,
+                confidence: "high", reason: "Concrete project root."))
+
+        XCTAssertEqual(PortCategory.classify([activity]), .devServer)
+        XCTAssertNil(CloseService.protectionReason(for: activity))
     }
 
     func testKeepAliveServicesAreRefusedWithAStopCommand() {

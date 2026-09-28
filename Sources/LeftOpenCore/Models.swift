@@ -147,13 +147,23 @@ public struct ScanSnapshot: Sendable {
         Set(activities.filter { $0.inference.category == .project }.map(\.listener.port)).count
     }
     public var closableActivities: [Activity] {
-        activities.filter { CloseService.protectionReason(for: $0) == nil }
+        closableActivities(safetyProtectionEnabled: true)
+    }
+    public func closableActivities(safetyProtectionEnabled: Bool) -> [Activity] {
+        activities.filter {
+            CloseService.protectionReason(for: $0,
+                safetyProtectionEnabled: safetyProtectionEnabled) == nil
+        }
     }
     public var closablePortCount: Int {
         Set(closableActivities.map(\.listener.port)).count
     }
     public var closableProjectActivities: [Activity] {
         closableActivities.filter { $0.inference.category == .project }
+    }
+    public func closableProjectActivities(safetyProtectionEnabled: Bool) -> [Activity] {
+        closableActivities(safetyProtectionEnabled: safetyProtectionEnabled)
+            .filter { $0.inference.category == .project }
     }
     public var closableProjectPortCount: Int {
         Set(closableProjectActivities.map(\.listener.port)).count
