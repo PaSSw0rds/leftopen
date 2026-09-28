@@ -4,6 +4,126 @@ import XCTest
 @testable import LeftOpenCore
 
 final class LeftOpenCoreTests: XCTestCase {
+    private func forceFixture() throws -> (Activity, ClosePlan) {
+        let activity = fixtureActivity(pid: 42, path: "/opt/local/bin/node")
+        let plan = try CloseService.makePlan(activities: [activity], port: 3000, pid: 42,
+            currentUID: Int32(getuid()), currentPID: getpid(), startTime: { _ in "original" })
+        return (activity, plan)
+    }
+
+    private func forceOffer() throws -> (Activity, ForceCloseOffer) {
+        let (activity, plan) = try forceFixture()
+        let result = try CloseService.perform(plan, signal: SIGTERM,
+            scan: { [activity] }, startTime: { _ in "original" }, send: { _, _ in 0 },
+            listeners: { [activity.listener] }, wait: {})
+        return (activity, try XCTUnwrap(result.forceCloseOffer))
+    }
+
+    func testForceCloseRequiresFailedGentleAttemptAndExplicitExecution() throws {
+        let (activity, plan) = try forceFixture()
+        var signals: [Int32] = []
+        let send: (Int32, Int32) -> Int32 = { pid, signal in
+            XCTAssertEqual(pid, 42)
+            signals.append(signal)
+            return 0
+        }
+        XCTAssertThrowsError(try CloseService.perform(plan, signal: SIGKILL,
+            scan: { [activity] }, startTime: { _ in "original" }, send: send,
+            listeners: { [] }, wait: {}))
+        XCTAssertTrue(signals.isEmpty)
+        let gentle = try CloseService.perform(plan, signal: SIGTERM,
+            scan: { [activity] }, startTime: { _ in "original" }, send: send,
+            listeners: { [activity.listener] }, wait: {})
+        XCTAssertEqual(signals, [SIGTERM])
+        let offer = try XCTUnwrap(gentle.forceCloseOffer)
+        let forced = try CloseService.perform(plan, signal: SIGKILL, offer: offer,
+            scan: { [activity] }, startTime: { _ in "original" }, send: send,
+            listeners: { [] }, wait: {})
+        XCTAssertEqual(signals, [SIGTERM, SIGKILL])
+        XCTAssertTrue(forced.portFree)
+        XCTAssertNil(forced.forceCloseOffer)
+    }
+
+    func testSuccessfulGentleCloseNeverOffersForce() throws {
+        let (activity, plan) = try forceFixture()
+        let result = try CloseService.perform(plan, signal: SIGTERM,
+            scan: { [activity] }, startTime: { _ in "original" }, send: { _, _ in 0 },
+            listeners: { [] }, wait: {})
+        XCTAssertNil(result.forceCloseOffer)
+        XCTAssertTrue(result.portFree)
+        // A different PID holding the port is not eligible either.
+        let peer = fixtureActivity(pid: 43, path: "/opt/local/bin/node")
+        let occupied = try CloseService.perform(plan, signal: SIGTERM,
+            scan: { [activity] }, startTime: { _ in "original" }, send: { _, _ in 0 },
+            listeners: { [peer.listener] }, wait: {})
+        XCTAssertNil(occupied.forceCloseOffer)
+        XCTAssertFalse(occupied.portFree)
+    }
+
+    func testFailedSignalOrUnknownOutcomeDoesNotProduceForceOffer() throws {
+        let (activity, plan) = try forceFixture()
+        XCTAssertThrowsError(try CloseService.perform(plan, signal: SIGTERM,
+            scan: { [activity] }, startTime: { _ in "original" }, send: { _, _ in -1 },
+            listeners: { XCTFail("Should not scan after failed signal"); return [] }, wait: {}))
+        XCTAssertThrowsError(try CloseService.perform(plan, signal: SIGTERM,
+            scan: { [activity] }, startTime: { _ in "original" }, send: { _, _ in 0 },
+            listeners: { throw CloseError("scan unavailable") }, wait: {})) { error in
+                XCTAssertTrue((error as? CloseError)?.signalSent == true)
+            }
+    }
+
+    func testForceCloseRejectsChangedIdentityPeersPortsAndExpiry() throws {
+        let (activity, offer) = try forceOffer()
+        let cases: [([Activity], String?)] = [
+            ([], "original"), ([activity], "reused PID"), ([activity], nil),
+            ([fixtureActivity(pid: 42, path: "/opt/local/bin/python")], "original"),
+            ([fixtureActivity(pid: 42, path: "/opt/local/bin/node", uid: Int32(getuid()) + 1)], "original"),
+            ([activity, fixtureActivity(pid: 43, path: "/opt/local/bin/node")], "original"),
+            ([activity, fixtureActivity(pid: 42, path: "/opt/local/bin/node", port: 3001)], "original"),
+            ([fixtureActivity(pid: 42, path: "/opt/local/bin/node", appBundle: true)], "original"),
+        ]
+        for (activities, start) in cases {
+            XCTAssertThrowsError(try CloseService.perform(offer.plan, signal: SIGKILL, offer: offer,
+                scan: { activities }, startTime: { _ in start },
+                send: { _, _ in XCTFail("Must not send a signal"); return 0 },
+                listeners: { [] }, wait: {}))
+        }
+        XCTAssertThrowsError(try CloseService.verifyForceClose(offer, activities: [activity],
+            freshStartTime: "original", now: Date().addingTimeInterval(121)))
+    }
+
+    func testForceCloseAgainstOwnedUncooperativeListener() throws {
+        // Only this test-owned child is signalled; it never uses an existing listener.
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = ["-c", "import signal,socket,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(); time.sleep(30)"]
+        try child.run()
+        defer {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            child.waitUntilExit()
+        }
+        var port: Int?
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && child.isRunning {
+            port = try Scanner.scanListeners().first { $0.pid == child.processIdentifier }?.port
+            if port != nil { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        // The fixture uses the system Python executable, so disable path protection
+        // for this explicitly owned PID only; identity checks remain enforced.
+        let plan = try CloseService.prepare(port: XCTUnwrap(port), pid: child.processIdentifier,
+                                            safetyProtectionEnabled: false)
+        let gentle = try CloseService.execute(plan)
+        XCTAssertFalse(gentle.targetStoppedListening)
+        XCTAssertTrue(child.isRunning)
+        let result = try CloseService.forceClose(XCTUnwrap(gentle.forceCloseOffer))
+        XCTAssertTrue(result.targetStoppedListening)
+        XCTAssertTrue(result.portFree)
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(child.terminationStatus, SIGKILL)
+    }
+
     func testBrowserAddressUsesObservedBindAddress() {
         func url(_ addresses: [String]) -> String? {
             let listener = Listener(pid: 42, command: "node", uid: 501, user: nil,

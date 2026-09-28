@@ -316,7 +316,7 @@ if args.contains("-h") || args.contains("--help") {
 }
 
 if args.contains("-v") || args.contains("--version") {
-    print("LeftOpen 0.4.1")
+    print("LeftOpen 0.4.2")
     exit(0)
 }
 

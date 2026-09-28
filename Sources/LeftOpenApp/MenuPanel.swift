@@ -321,15 +321,20 @@ struct MenuPanel: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: notice.kind.symbol)
                 .foregroundStyle(notice.kind.color)
-            Text(notice.text)
-                .font(.callout)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(notice.text)
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if model.isClosing {
+                    ProgressView().controlSize(.small)
+                }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(notice.kind.color.opacity(0.08))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 
     private var footer: some View {
@@ -525,6 +530,7 @@ struct MenuPanel: View {
                         title: group.primary.inference.label,
                         subtitle: group.subtitle,
                         isLAN: group.scope == .lan,
+                        closeFailed: model.awaitsForceClose(group.primary),
                         allowsSwipe: false,
                         alignIdentityWithPorts: expanded,
                         disclosure: expanded,
@@ -551,6 +557,7 @@ struct MenuPanel: View {
                     subtitle: group.subtitle,
                     trailing: activity.process.compactUptime,
                     isLAN: activity.scope == .lan,
+                    closeFailed: model.awaitsForceClose(activity),
                     onSelect: { showDetails(activity) },
                     onClose: closeTarget.map { target in { closeNow(target) } }
                 )
@@ -569,6 +576,7 @@ struct MenuPanel: View {
             title: activity.listener.addresses.joined(separator: ", "),
             subtitle: activity.scope == .lan ? L("LAN-facing", "局域网可见") : L("Local only", "仅本机"),
             isLAN: activity.scope == .lan,
+            closeFailed: model.awaitsForceClose(activity),
             onSelect: { showDetails(activity) },
             onClose: closeTarget.map { target in { closeNow(target) } }
         )
@@ -654,10 +662,15 @@ struct MenuPanel: View {
                             Button {
                                 close(activity)
                             } label: {
-                                Text(L("Close…", "关闭…")).foregroundStyle(Color(nsColor: .systemRed))
+                                Text(model.awaitsForceClose(activity)
+                                     ? L("Force Close", "强制关闭") : L("Close…", "关闭…"))
+                                    .foregroundStyle(Color(nsColor: .systemRed))
                             }
                             .disabled(model.isPreparingClose || model.isClosing)
-                            .help(L("Review closing PID \(String(activity.process.pid))", "确认关闭 PID \(String(activity.process.pid))"))
+                            .help(model.awaitsForceClose(activity)
+                                  ? L("Force close PID \(String(activity.process.pid)); unsaved work may be lost",
+                                      "强制结束 PID \(String(activity.process.pid))；可能丢失未保存的数据")
+                                  : L("Review closing PID \(String(activity.process.pid))", "确认关闭 PID \(String(activity.process.pid))"))
                         }
                     }
                     .buttonStyle(.bordered)
@@ -908,7 +921,9 @@ struct MenuPanel: View {
         if !closable.isEmpty {
             Divider()
             ForEach(closable) { activity in
-                Button(L("Close Port \(String(activity.listener.port))…", "关闭端口 \(String(activity.listener.port))…")) { close(activity) }
+                Button(model.awaitsForceClose(activity)
+                       ? L("Force Close PID \(String(activity.process.pid))", "强制关闭 PID \(String(activity.process.pid))")
+                       : L("Close Port \(String(activity.listener.port))…", "关闭端口 \(String(activity.listener.port))…")) { close(activity) }
             }
         }
     }
@@ -985,6 +1000,7 @@ private struct PortRow: View {
     var subtitle: String?
     var trailing: String?
     var isLAN = false
+    var closeFailed = false
     var allowsSwipe = true
     /// Expanded process headers put their icon in the now-vacant port column.
     var alignIdentityWithPorts = false
@@ -998,9 +1014,6 @@ private struct PortRow: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered = false
 
-    // How much of each action is uncovered: the gap between the layer's edge and the card.
-    private var leadingReveal: CGFloat { max(0, swipe.offset) }
-    private var trailingReveal: CGFloat { max(0, -swipe.offset) }
     private var isLifted: Bool { swipe.offset != 0 }
 
     @ViewBuilder
@@ -1078,6 +1091,13 @@ private struct PortRow: View {
 
             if let icon {
                 ProcessIconView(activity: icon, size: 22)
+                    .overlay(alignment: .topTrailing) {
+                        if closeFailed {
+                            failedCloseDot.offset(x: 2, y: -2)
+                        }
+                    }
+            } else if closeFailed {
+                failedCloseDot
             }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -1122,14 +1142,24 @@ private struct PortRow: View {
         }
     }
 
+    private var failedCloseDot: some View {
+        Circle()
+            .fill(Color(nsColor: .systemRed))
+            .frame(width: 7, height: 7)
+            .accessibilityLabel(L("Previous close failed; close again to force", "上次关闭失败；再次关闭将强制结束"))
+    }
+
     /// Details under the leading half, Close (or a lock, when it can't be closed) under the
     /// trailing half. Each label is centred in whatever part of its side is uncovered.
     @ViewBuilder
     private var actionLayer: some View {
         if allowsSwipe && onSelect != nil && swipe.offset != 0 {
-            HStack(spacing: 0) {
-                side(onClose == nil ? .locked : .close, reveal: leadingReveal, alignment: .leading)
-                side(.details, reveal: trailingReveal, alignment: .trailing)
+            Group {
+                if swipe.offset > 0 {
+                    side(onClose == nil ? .locked : .close, alignment: .leading)
+                } else {
+                    side(.details, alignment: .trailing)
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .animation(.snappy(duration: 0.18), value: swipe.isArmed)
@@ -1138,7 +1168,7 @@ private struct PortRow: View {
 
     private enum Action { case details, close, locked }
 
-    private func side(_ action: Action, reveal: CGFloat, alignment: Alignment) -> some View {
+    private func side(_ action: Action, alignment: Alignment) -> some View {
         let tint = switch action {
         case .details: Color(nsColor: .systemBlue)
         case .close: Color(nsColor: .systemRed)
@@ -1149,19 +1179,16 @@ private struct PortRow: View {
             Rectangle().fill(armed ? tint : tint.opacity(0.16))
             HStack(spacing: 5) {
                 Image(systemName: action == .details ? "info.circle.fill" : action == .close ? "xmark.circle.fill" : "lock.fill")
-                    .font(.system(size: reveal < 30 ? 10 : 13, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .scaleEffect(armed ? 1.15 : 1)
-                if reveal > 78 {
-                    Text(action == .details ? L("Details", "详情") : L("Close", "关闭"))
-                        .font(.system(size: 11, weight: .semibold))
-                        .transition(.opacity)
-                }
+                Text(action == .details ? L("Details", "详情")
+                     : closeFailed ? L("Force Close", "强制关闭") : L("Close", "关闭"))
+                    .font(.system(size: 11, weight: .semibold))
             }
             .foregroundStyle(armed ? Color.white : tint)
-            .frame(width: reveal)
-            .opacity(reveal > 6 ? 1 : 0)
-            .animation(.easeOut(duration: 0.12), value: reveal > 78)
+            .padding(.horizontal, 14)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
         .accessibilityHidden(true)
     }
 

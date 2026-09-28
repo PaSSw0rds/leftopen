@@ -726,8 +726,8 @@
       </section>
       <section class="safety">
         <h2 lang="zh">关闭前，先再确认一次。</h2><h2 lang="en">One last check before closing.</h2>
-        <p lang="zh"><strong>只发送 SIGTERM。</strong>LeftOpen 会重新确认 PID 与启动时间，并列出同一进程的其他端口。它不提供强制关闭，不碰系统进程，也不收集遥测。</p>
-        <p lang="en"><strong>SIGTERM only.</strong> LeftOpen verifies the PID and start time again, and shows other ports from the same process. There is no force-close action, no system-process control and no telemetry.</p>
+        <p lang="zh"><strong>先轻轻关闭。</strong>LeftOpen 优先发送 SIGTERM。单独关闭后仍在监听，该进程会显示失败提示；警告会说明两分钟内再次关闭将强制结束。执行前重新核验进程身份，保留安全保护，不收集遥测。</p>
+        <p lang="en"><strong>Gentle close first.</strong> LeftOpen sends SIGTERM first. If a single-process close leaves it listening, that process is marked and the warning explains that closing it again within two minutes will force close it. Identity checks and safety protections still apply. No telemetry.</p>
       </section>
       <section id="cli" class="cli">
         <div>

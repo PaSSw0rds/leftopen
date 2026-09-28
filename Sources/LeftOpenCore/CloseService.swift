@@ -19,6 +19,19 @@ public struct CloseResult: Sendable {
     public let targetStoppedListening: Bool
     public let portFree: Bool
     public let remainingPIDs: [Int32]
+    public let forceCloseOffer: ForceCloseOffer?
+}
+
+/// Only a completed gentle-close attempt can create this short-lived capability.
+public struct ForceCloseOffer: Sendable, Identifiable {
+    public let id = UUID()
+    public let plan: ClosePlan
+    fileprivate let issuedAt: Date
+
+    fileprivate init(plan: ClosePlan) {
+        self.plan = plan
+        self.issuedAt = Date()
+    }
 }
 
 public struct BatchCloseResult: Sendable {
@@ -36,7 +49,7 @@ public struct BatchCloseResult: Sendable {
 
 public struct CloseError: LocalizedError, Sendable {
     public let message: String
-    /// SIGTERM already went out, so the failure is about the aftermath, not a refusal.
+    /// A signal already went out, so the failure is about the aftermath, not a refusal.
     public let signalSent: Bool
     public var errorDescription: String? { message }
 
@@ -139,25 +152,64 @@ public enum CloseService {
     }
 
     public static func execute(_ plan: ClosePlan) throws -> CloseResult {
-        let fresh = try Scanner.scan()
-        try verify(plan: plan, activities: fresh.activities, freshStartTime: processStartTime(plan.pid))
-        guard kill(plan.pid, SIGTERM) == 0 else {
-            throw CloseError(L("SIGTERM could not be sent to PID \(plan.pid): \(String(cString: strerror(errno))).",
-                             "无法向 PID \(plan.pid) 发送 SIGTERM：\(String(cString: strerror(errno)))。"))
+        try perform(plan, signal: SIGTERM)
+    }
+
+    public static func forceClose(_ offer: ForceCloseOffer) throws -> CloseResult {
+        try perform(offer.plan, signal: SIGKILL, offer: offer)
+    }
+
+    static func verifyForceClose(_ offer: ForceCloseOffer, activities: [Activity],
+                                 freshStartTime: String?, now: Date = Date()) throws {
+        guard now.timeIntervalSince(offer.issuedAt) >= 0,
+              now.timeIntervalSince(offer.issuedAt) < 120 else {
+            throw CloseError(L("Force close expired. Try a gentle close again.", "强制关闭已过期，请先重新尝试轻轻关闭。"))
+        }
+        let plan = offer.plan
+        try verify(plan: plan, activities: activities, freshStartTime: freshStartTime)
+        let ports = Set(activities.filter { $0.process.pid == plan.pid }.map(\.listener.port))
+        guard ports.isSubset(of: Set(plan.otherPorts + [plan.port])) else {
+            throw CloseError(L("This process opened additional ports. Try a gentle close again to review them.",
+                               "此进程新增了监听端口，请重新尝试轻轻关闭并查看影响范围。"))
+        }
+    }
+
+    // Injectable system boundaries let tests verify signal ordering without killing real processes.
+    static func perform(_ plan: ClosePlan, signal: Int32, offer: ForceCloseOffer? = nil,
+                        scan: () throws -> [Activity] = { try Scanner.scan().activities },
+                        startTime: (Int32) -> String? = processStartTime,
+                        send: (Int32, Int32) -> Int32 = { kill($0, $1) },
+                        listeners: () throws -> [Listener] = Scanner.scanListeners,
+                        wait: () -> Void = { Thread.sleep(forTimeInterval: 0.5) }) throws -> CloseResult {
+        let fresh = try scan()
+        if signal == SIGKILL {
+            guard let offer, offer.plan.id == plan.id else {
+                throw CloseError(L("Try a gentle close first.", "请先尝试轻轻关闭。"))
+            }
+            try verifyForceClose(offer, activities: fresh, freshStartTime: startTime(plan.pid))
+        } else {
+            try verify(plan: plan, activities: fresh, freshStartTime: startTime(plan.pid))
+        }
+        let signalName = signal == SIGKILL ? "SIGKILL" : "SIGTERM"
+        guard send(plan.pid, signal) == 0 else {
+            throw CloseError(L("\(signalName) could not be sent to PID \(plan.pid): \(String(cString: strerror(errno))).",
+                               "无法向 PID \(plan.pid) 发送 \(signalName)：\(String(cString: strerror(errno)))。"))
         }
         var latest: [Listener] = []
         for _ in 0..<10 {
-            Thread.sleep(forTimeInterval: 0.5)
+            wait()
             do {
-                latest = try Scanner.scanListeners().filter { $0.port == plan.port }
+                latest = try listeners().filter { $0.port == plan.port }
             } catch {
-                throw CloseError(L("SIGTERM was sent to PID \(plan.pid), but the follow-up listener scan failed: \(error.localizedDescription)",
-                                     "已向 PID \(plan.pid) 发送 SIGTERM，但随后的端口检查失败：\(error.localizedDescription)"), signalSent: true)
+                throw CloseError(L("\(signalName) was sent to PID \(plan.pid), but the follow-up listener scan failed: \(error.localizedDescription)",
+                                     "已向 PID \(plan.pid) 发送 \(signalName)，但随后的端口检查失败：\(error.localizedDescription)"), signalSent: true)
             }
             if !latest.contains(where: { $0.pid == plan.pid }) { break }
         }
         return CloseResult(targetStoppedListening: !latest.contains(where: { $0.pid == plan.pid }),
-            portFree: latest.isEmpty, remainingPIDs: Array(Set(latest.map(\.pid))).sorted())
+            portFree: latest.isEmpty, remainingPIDs: Array(Set(latest.map(\.pid))).sorted(),
+            forceCloseOffer: signal == SIGTERM && latest.contains(where: { $0.pid == plan.pid })
+                ? ForceCloseOffer(plan: plan) : nil)
     }
 
     public static func prepareBatch(activities: [Activity],

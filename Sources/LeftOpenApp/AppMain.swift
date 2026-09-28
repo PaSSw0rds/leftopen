@@ -7,12 +7,14 @@ import SwiftUI
 enum NoticeKind {
     case success
     case warning
+    case forceClose
     case error
 
     var symbol: String {
         switch self {
         case .success: "checkmark.circle"
         case .warning: "exclamationmark.triangle"
+        case .forceClose: "exclamationmark.triangle.fill"
         case .error: "xmark.circle"
         }
     }
@@ -21,6 +23,7 @@ enum NoticeKind {
         switch self {
         case .success: Color(nsColor: .systemGreen)
         case .warning: Color(nsColor: .systemOrange)
+        case .forceClose: Color(nsColor: .systemRed)
         case .error: Color(nsColor: .systemRed)
         }
     }
@@ -71,6 +74,7 @@ final class MenuModel: ObservableObject {
     @Published var pendingPlan: ClosePlan?
     @Published var pendingBatchPlans: [ClosePlan]?
     @Published private(set) var notice: Notice?
+    @Published private(set) var forceCloseOffer: ForceCloseOffer?
     @Published var selectedActivityID: String?
     @Published var lastRefresh: Date?
     /// Rows hidden optimistically after a completed swipe while the safe close check runs.
@@ -97,6 +101,11 @@ final class MenuModel: ObservableObject {
     }
 
     var portCount: Int { visible.portCount }
+    var hasFailedClose: Bool { forceCloseOffer != nil }
+
+    func awaitsForceClose(_ activity: Activity) -> Bool {
+        forceCloseOffer?.plan.pid == activity.process.pid
+    }
     var lanPortCount: Int { visible.lanPortCount }
     var closablePortCount: Int {
         Set(visible.closableActivities(
@@ -121,6 +130,7 @@ final class MenuModel: ObservableObject {
             .sink { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.notice = nil
+                    self?.forceCloseOffer = nil
                     Task { await self?.refresh() }
                 }
             }
@@ -131,6 +141,7 @@ final class MenuModel: ObservableObject {
                 MainActor.assumeIsolated {
                     self?.pendingPlan = nil
                     self?.pendingBatchPlans = nil
+                    self?.forceCloseOffer = nil
                 }
             }
     }
@@ -189,13 +200,21 @@ final class MenuModel: ObservableObject {
             do {
                 snapshot = try await Task.detached(priority: .utility) { try Scanner.scan() }.value
                 lastRefresh = Date()
-                notice = nil
+                if let offer = forceCloseOffer {
+                    if !snapshot.activities.contains(where: {
+                        $0.process.pid == offer.plan.pid && $0.listener.port == offer.plan.port
+                    }) {
+                        forceCloseOffer = nil
+                        notice = nil
+                    }
+                }
                 // Play open sound when closable ports increase
                 if closablePortCount > previousClosablePortCount {
                     DoorSound.doorOpen.play()
                 }
                 previousClosablePortCount = closablePortCount
             } catch {
+                forceCloseOffer = nil
                 post(Notice(kind: .error, text: L("Scan failed: \(error.localizedDescription)", "扫描失败：\(error.localizedDescription)")))
             }
         } while rescanRequested
@@ -203,7 +222,12 @@ final class MenuModel: ObservableObject {
 
     func previewClose(_ activity: Activity) async {
         guard !isPreparingClose && !isClosing else { return }
+        if let offer = forceCloseOffer, offer.plan.pid == activity.process.pid {
+            await confirmForceClose(offer)
+            return
+        }
         isPreparingClose = true
+        forceCloseOffer = nil
         defer { isPreparingClose = false }
         notice = nil
         do {
@@ -226,7 +250,12 @@ final class MenuModel: ObservableObject {
     /// and executed without the review page. Identity checks in CloseService still apply.
     func closeNow(_ activity: Activity) async {
         guard !isPreparingClose && !isClosing else { return }
+        if let offer = forceCloseOffer, offer.plan.pid == activity.process.pid {
+            await confirmForceClose(offer)
+            return
+        }
         isPreparingClose = true
+        forceCloseOffer = nil
         _ = withAnimation(.easeOut(duration: 0.16)) {
             closingActivityIDs.insert(activity.id)
         }
@@ -270,11 +299,21 @@ final class MenuModel: ObservableObject {
                             "PID \(plan.pid) 已停止监听，但端口 \(plan.port) 现在被 \(holders) 占用。")
                 kind = .warning
             } else {
-                outcome = L("SIGTERM was sent, but PID \(plan.pid) still listens. No force-kill was attempted.",
-                            "已发送 SIGTERM，但 PID \(plan.pid) 仍在监听。未尝试强制结束。")
-                kind = .warning
+                outcome = L("PID \(plan.pid) is still listening. Close it again within two minutes to force close; unsaved work may be lost.",
+                            "PID \(plan.pid) 仍在监听。两分钟内再次关闭将强制结束，可能丢失未保存的数据。")
+                kind = .forceClose
             }
             await refresh()
+            if plan.safetyProtectionEnabled == AppSettings.shared.safetyProtectionEnabled,
+               snapshot.activities.contains(where: { $0.process.pid == plan.pid && $0.listener.port == plan.port }) {
+                forceCloseOffer = result.forceCloseOffer
+                if let offer = forceCloseOffer {
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(120))
+                        if self?.forceCloseOffer?.id == offer.id { self?.forceCloseOffer = nil }
+                    }
+                }
+            }
             post(Notice(kind: kind, text: outcome))
         } catch {
             pendingPlan = nil
@@ -287,9 +326,43 @@ final class MenuModel: ObservableObject {
         }
     }
 
+    func confirmForceClose(_ offer: ForceCloseOffer) async {
+        guard !isClosing, !isPreparingClose, !isPreparingBatchClose else {
+            post(Notice(kind: .warning, text: L("A close is already in progress. Please wait.", "正在执行关闭，请稍候。")))
+            return
+        }
+        guard forceCloseOffer?.id == offer.id else {
+            post(Notice(kind: .warning, text: L("Force close is no longer available. Try a gentle close again.", "强制关闭已失效，请先重新尝试轻轻关闭。")))
+            return
+        }
+        // Consume the offer before awaiting: double clicks cannot resend SIGKILL.
+        forceCloseOffer = nil
+        isClosing = true
+        post(Notice(kind: .warning, text: L("Force closing PID \(offer.plan.pid)…", "正在强制关闭 PID \(offer.plan.pid)…")))
+        defer { isClosing = false }
+        do {
+            let result = try await Task.detached(priority: .utility) {
+                try CloseService.forceClose(offer)
+            }.value
+            await refresh()
+            if result.portFree {
+                playCloseSound()
+                post(Notice(kind: .success, text: L("Port \(offer.plan.port) is free.", "端口 \(offer.plan.port) 已释放。")))
+            } else {
+                post(Notice(kind: .warning, text: result.targetStoppedListening
+                    ? L("The process stopped listening, but another process holds the port.", "该进程已停止监听，但端口仍被其他进程占用。")
+                    : L("Force close was sent, but the process is still listening.", "已发送强制关闭信号，但进程仍在监听。")))
+            }
+        } catch {
+            await refresh()
+            post(Notice(kind: .warning, text: error.localizedDescription))
+        }
+    }
+
     func previewBatchCloseProjects() async {
         guard !isPreparingBatchClose && !isClosing else { return }
         isPreparingBatchClose = true
+        forceCloseOffer = nil
         defer { isPreparingBatchClose = false }
         notice = nil
         do {
@@ -365,6 +438,15 @@ struct LeftOpenApp: App {
                     Image(systemName: "exclamationmark.triangle")
                 } else {
                     Image(nsImage: model.hasOpenDoors ? MenuBarDoor.open : MenuBarDoor.closed)
+                        .overlay(alignment: .topTrailing) {
+                            if model.hasFailedClose {
+                                Circle()
+                                    .fill(Color(nsColor: .systemRed))
+                                    .frame(width: 6, height: 6)
+                                    .offset(x: 2, y: -2)
+                                    .accessibilityHidden(true)
+                            }
+                        }
                 }
                 if let badgeCount {
                     Text(String(badgeCount)).monospacedDigit()
@@ -385,6 +467,10 @@ struct LeftOpenApp: App {
     }
 
     private var accessibilityLabel: String {
+        if let offer = model.forceCloseOffer {
+            return L("LeftOpen, PID \(offer.plan.pid) did not close; close it again to force close",
+                     "LeftOpen，PID \(offer.plan.pid) 未能关闭；再次关闭将强制结束")
+        }
         if model.notice?.kind == .error {
             return L("LeftOpen scan failed; \(model.portCount) last known listening ports", "LeftOpen 扫描失败；上次已知 \(model.portCount) 个监听端口")
         }
