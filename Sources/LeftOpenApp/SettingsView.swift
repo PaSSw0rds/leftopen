@@ -66,23 +66,22 @@ struct SettingsView: View {
                 Toggle(L("Play a sound when a port closes", "关闭端口时播放提示音"),
                        isOn: $settings.soundEffectsEnabled)
                 if settings.soundEffectsEnabled {
-                    HStack(spacing: 12) {
-                        Text(L("Volume", "音量")).frame(width: 50, alignment: .leading)
-                        Slider(value: $settings.soundVolume, in: 0...1, step: 0.1)
-                            .controlSize(.small)
-                            .onChange(of: settings.soundVolume) { _ in
-                                volumePreviewTask?.cancel()
-                                volumePreviewTask = Task {
-                                    try? await Task.sleep(for: .milliseconds(200))
-                                    guard !Task.isCancelled else { return }
-                                    previewSoundToggle.toggle()
-                                    if previewSoundToggle {
-                                        DoorSound.doorOpen.play()
-                                    } else {
-                                        DoorSound.doorClose.play()
-                                    }
-                                }
-                            }
+                    Slider(value: $settings.soundVolume, in: 0...1) {
+                        Text(L("Volume", "音量"))
+                    } minimumValueLabel: {
+                        Image(systemName: "speaker.fill").foregroundStyle(.secondary)
+                    } maximumValueLabel: {
+                        Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
+                    }
+                    .labelsHidden()
+                    .onChange(of: settings.soundVolume) {
+                        volumePreviewTask?.cancel()
+                        volumePreviewTask = Task {
+                            try? await Task.sleep(for: .milliseconds(200))
+                            guard !Task.isCancelled else { return }
+                            previewSoundToggle.toggle()
+                            (previewSoundToggle ? DoorSound.doorOpen : DoorSound.doorClose).play()
+                        }
                     }
                 }
             } header: {
