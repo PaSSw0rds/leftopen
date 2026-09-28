@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version (for example: 0.4.1)'
+        required: true
+        type: string
+
+concurrency:
+  group: leftopen-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ inputs.version }}
+      sha256: ${{ steps.archive.outputs.sha256 }}
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      LEFTOPEN_BUNDLE_ID: app.leftopen.mac
+      LEFTOPEN_NOTARY_PROFILE: leftopen-ci
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set temporary paths
+        run: |
+          echo "LEFTOPEN_OUTPUT_DIR=$RUNNER_TEMP/leftopen-release" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$RUNNER_TEMP/leftopen-signing.keychain-db" >> "$GITHUB_ENV"
+          echo "LEFTOPEN_NOTARY_KEYCHAIN=$RUNNER_TEMP/leftopen-signing.keychain-db" >> "$GITHUB_ENV"
+
+      - name: Check release credentials
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          for name in CERTIFICATE CERTIFICATE_PASSWORD SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD TAP_TOKEN; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing $name. See docs/releasing.md for one-time setup."
+              exit 1
+            fi
+          done
+
+      - name: Prepare version
+        run: |
+          latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)"
+          python3 Scripts/prepare-release.py "$VERSION" "$((1000 + GITHUB_RUN_NUMBER))" --latest "$latest"
+          tag="v$VERSION"
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            if [[ "$(git rev-parse "$tag^{commit}")" != "$GITHUB_SHA" ]]; then
+              echo '::error::This version tag belongs to another commit.'
+              exit 1
+            fi
+          fi
+
+      - name: Test
+        run: |
+          python3 -m unittest discover -s Tests/ReleaseTests
+          swift test
+
+      - name: Build Universal app and CLI
+        run: Scripts/build-app.sh
+
+      - name: Install temporary signing credentials
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$SIGNING_KEYCHAIN"
+          certificate_path="$RUNNER_TEMP/leftopen-signing.p12"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$certificate_path"
+          security import "$certificate_path" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$SIGNING_KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$SIGNING_KEYCHAIN"
+          security list-keychains -d user -s "$SIGNING_KEYCHAIN"
+          xcrun notarytool store-credentials "$LEFTOPEN_NOTARY_PROFILE" \
+            --keychain "$SIGNING_KEYCHAIN" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+
+      - name: Sign, notarize, and verify
+        env:
+          LEFTOPEN_APP_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: Scripts/sign-and-notarize.sh
+
+      - name: Verify final archive
+        id: archive
+        run: |
+          cd "$LEFTOPEN_OUTPUT_DIR"
+          ditto -x -k LeftOpen-release.zip verified
+          app="$LEFTOPEN_OUTPUT_DIR/verified/LeftOpen.app"
+          "$GITHUB_WORKSPACE/Scripts/verify-universal-app.sh" "$app"
+          codesign --verify --deep --strict --all-architectures "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute "$app"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" == "$VERSION" ]]
+          [[ "$("$app/Contents/MacOS/leftopen" --version)" == "LeftOpen $VERSION" ]]
+          shasum -a 256 LeftOpen-release.zip > SHA256SUMS
+          echo "sha256=$(cut -d ' ' -f 1 SHA256SUMS)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish verified release
+        run: |
+          tag="v$VERSION"
+          # A network/auth error must not be treated as an absent release.
+          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | [.tag_name, .draft] | @tsv')"
+          state="$(printf '%s\n' "$releases" | awk -F '\t' -v tag="$tag" '$1 == tag { print $2 }')"
+          if [[ -n "$state" && "$state" != true ]]; then
+            echo '::error::A published release already exists; it will not be overwritten.'
+            exit 1
+          fi
+          if [[ -z "$state" ]]; then
+            gh release create "$tag" --target "$GITHUB_SHA" --draft \
+              --title "LeftOpen $tag" --generate-notes
+          else
+            target="$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)"
+            [[ "$target" == "$GITHUB_SHA" ]] || { echo '::error::Draft belongs to another commit.'; exit 1; }
+          fi
+          gh release upload "$tag" "$LEFTOPEN_OUTPUT_DIR/LeftOpen-release.zip" "$LEFTOPEN_OUTPUT_DIR/SHA256SUMS" --clobber
+          gh release edit "$tag" --draft=false --latest
+          echo "Published [$tag](https://github.com/$GH_REPO/releases/tag/$tag)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          if [[ -f "$SIGNING_KEYCHAIN" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/leftopen-signing.p12"
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+      SHA256: ${{ needs.release.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: SonghaiFan/homebrew-tap
+          ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update cask
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          path = Path('Casks/leftopen.rb')
+          source = path.read_text()
+          current = re.search(r'(?m)^  version "([0-9]+\.[0-9]+\.[0-9]+)"$', source)
+          if current is None:
+              raise SystemExit('Cannot determine the current cask version')
+          version_tuple = lambda value: tuple(map(int, value.split('.')))
+          if version_tuple(current[1]) > version_tuple(os.environ['VERSION']):
+              raise SystemExit('Refusing to downgrade a newer Homebrew release')
+          if not re.fullmatch(r'[0-9a-f]{64}', os.environ['SHA256']):
+              raise SystemExit('Missing or invalid release checksum')
+          for name, value in [('version', os.environ['VERSION']), ('sha256', os.environ['SHA256'])]:
+              source, count = re.subn(rf'(?m)^(  {name} )"[^"]+"$', lambda m: f'{m[1]}"{value}"', source)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one {name} field')
+          path.write_text(source)
+          PY
+          ruby -c Casks/leftopen.rb
+          git diff --check
+          if git diff --quiet -- Casks/leftopen.rb; then
+            echo 'Homebrew is already current.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Casks/leftopen.rb
+          git commit -m "Update LeftOpen to $VERSION"
+          git push origin HEAD:main
+          echo "Homebrew updated to $VERSION." >> "$GITHUB_STEP_SUMMARY"

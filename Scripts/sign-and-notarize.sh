@@ -32,7 +32,11 @@ codesign --force --options runtime --timestamp --sign "$LEFTOPEN_APP_IDENTITY" "
 codesign --force --options runtime --timestamp --sign "$LEFTOPEN_APP_IDENTITY" "$app_path"
 codesign --verify --deep --strict --all-architectures --verbose=2 "$app_path"
 ditto -c -k --keepParent "$app_path" "$zip_path"
-xcrun notarytool submit "$zip_path" --keychain-profile "$LEFTOPEN_NOTARY_PROFILE" --wait
+notary_args=(--keychain-profile "$LEFTOPEN_NOTARY_PROFILE")
+if [[ -n "${LEFTOPEN_NOTARY_KEYCHAIN:-}" ]]; then
+  notary_args+=(--keychain "$LEFTOPEN_NOTARY_KEYCHAIN")
+fi
+xcrun notarytool submit "$zip_path" "${notary_args[@]}" --wait
 xcrun stapler staple "$app_path"
 xcrun stapler validate "$app_path"
 spctl --assess --type execute --verbose=2 "$app_path"

@@ -120,6 +120,8 @@ LOCAL = this Mac only · LAN = may be reachable from your local network
 
 ## Development
 
+Maintainers: [one-click releases](docs/releasing.md).
+
 ```bash
 # Tests
 swift test
