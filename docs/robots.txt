@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://songhaifan.github.io/leftopen/sitemap.xml
+Sitemap: https://leftopen.songhai.site/sitemap.xml
