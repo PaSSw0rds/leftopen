@@ -86,15 +86,14 @@ final class MenuModel: ObservableObject {
     private var settingsObserver: AnyCancellable?
     private var languageObserver: AnyCancellable?
     private var safetyProtectionObserver: AnyCancellable?
-    private var previousClosablePortCount = 0
+    private var previousListeningPorts: Set<Int>?
 
-    /// The scan minus ports the user chose to ignore, so every count agrees with the list.
+    /// Hide a closing row optimistically until the follow-up scan confirms the result.
     var visible: ScanSnapshot {
-        let ignored = AppSettings.shared.ignoredPorts
-        guard !ignored.isEmpty || !closingActivityIDs.isEmpty else { return snapshot }
+        guard !closingActivityIDs.isEmpty else { return snapshot }
         return ScanSnapshot(
             activities: snapshot.activities.filter {
-                !ignored.contains($0.listener.port) && !closingActivityIDs.contains($0.id)
+                !closingActivityIDs.contains($0.id)
             },
             limitations: snapshot.limitations
         )
@@ -159,12 +158,6 @@ final class MenuModel: ObservableObject {
         }
     }
 
-    /// A door latch, for the "the door shut" moment. Silent when the user has turned sound
-    /// effects off, or when the close didn't actually free the port.
-    private func playCloseSound() {
-        CloseEffect.playSound()
-    }
-
     /// Success notices fade on their own; warnings and errors stay until the next action.
     private func post(_ notice: Notice) {
         self.notice = notice
@@ -208,11 +201,15 @@ final class MenuModel: ObservableObject {
                         notice = nil
                     }
                 }
-                // Play open sound when closable ports increase
-                if closablePortCount > previousClosablePortCount {
-                    DoorSound.doorOpen.play()
+                let listeningPorts = Set(snapshot.activities.map(\.listener.port))
+                if let previousListeningPorts {
+                    if !listeningPorts.subtracting(previousListeningPorts).isEmpty {
+                        DoorSound.doorOpen.play()
+                    } else if !previousListeningPorts.subtracting(listeningPorts).isEmpty {
+                        DoorSound.doorClose.play()
+                    }
                 }
-                previousClosablePortCount = closablePortCount
+                previousListeningPorts = listeningPorts
             } catch {
                 forceCloseOffer = nil
                 post(Notice(kind: .error, text: L("Scan failed: \(error.localizedDescription)", "扫描失败：\(error.localizedDescription)")))
@@ -292,7 +289,6 @@ final class MenuModel: ObservableObject {
             if result.portFree {
                 outcome = L("Port \(plan.port) is free.", "端口 \(plan.port) 已释放。")
                 kind = .success
-                playCloseSound()
             } else if result.targetStoppedListening {
                 let holders = result.remainingPIDs.map(String.init).joined(separator: ", ")
                 outcome = L("PID \(plan.pid) stopped listening; port \(plan.port) is now held by \(holders).",
@@ -346,7 +342,6 @@ final class MenuModel: ObservableObject {
             }.value
             await refresh()
             if result.portFree {
-                playCloseSound()
                 post(Notice(kind: .success, text: L("Port \(offer.plan.port) is free.", "端口 \(offer.plan.port) 已释放。")))
             } else {
                 post(Notice(kind: .warning, text: result.targetStoppedListening
@@ -395,11 +390,9 @@ final class MenuModel: ObservableObject {
             selectedActivityID = nil
             await refresh()
             if result.isAllSuccessful {
-                playCloseSound()
                 post(Notice(kind: .success, text: L("Closed \(result.successfulPlans.count) project server\(result.successfulPlans.count == 1 ? "" : "s").",
                                                     "已关闭 \(result.successfulPlans.count) 个项目服务器。")))
             } else {
-                if !result.successfulPlans.isEmpty { playCloseSound() }
                 post(Notice(kind: .warning, text: L("Closed \(result.successfulPlans.count) of \(result.totalCount) servers. \(result.failedPlans.count) could not be closed.",
                                                     "已关闭 \(result.successfulPlans.count)/\(result.totalCount) 个服务器，\(result.failedPlans.count) 个未能关闭。")))
             }

@@ -63,7 +63,7 @@ struct MenuPanel: View {
 
     private var filteredActivities: [Activity] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        // Ignored ports stay out of the list unless a search asks for them.
+        // Search the full scan while omitting rows that are closing optimistically.
         guard !search.isEmpty else { return model.visible.activities }
         return model.snapshot.activities.filter { activity in
             guard !model.closingActivityIDs.contains(activity.id) else { return false }

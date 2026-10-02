@@ -253,17 +253,11 @@ final class ProcessIconCache: ObservableObject {
 struct ProcessIconResolver {
     @MainActor
     static func resolve(for activity: Activity) -> ProcessIconType {
-        // Tier 1: The listener executable itself belongs to a native macOS app. An indirect
-        // parent app is only host evidence (for example ChatGPT/Codex launching a project server),
-        // so it must not replace a concrete project's own icon.
+        // Tier 1: Use only a bundle established as the listener's owner. A raw executable path
+        // may pass through an app that merely supplies a project runtime.
         if let bundle = activity.applicationBundle, bundle.direct,
            FileManager.default.fileExists(atPath: bundle.path) {
             return .appBundle(path: bundle.path)
-        }
-        if let execPath = activity.process.executablePath,
-           let found = bundlePath(from: execPath),
-           FileManager.default.fileExists(atPath: found) {
-            return .appBundle(path: found)
         }
 
         // Tier 2: Icon the project ships itself, else a framework symbol from its manifest.
@@ -443,18 +437,6 @@ struct ProcessIconResolver {
         let target = exec ?? activity.process.command.lowercased()
         let nonHTTP = ["postgres", "pg_ctl", "redis", "valkey", "keydb", "mysql", "mariadb", "mongod", "rabbitmq", "memcached"]
         return !nonHTTP.contains { target.contains($0) }
-    }
-
-    private static func bundlePath(from path: String) -> String? {
-        guard path.hasPrefix("/") else { return nil }
-        var parts: [String] = []
-        for part in path.split(separator: "/") {
-            parts.append(String(part))
-            if part.lowercased().hasSuffix(".app") {
-                return "/" + parts.joined(separator: "/")
-            }
-        }
-        return nil
     }
 
     @MainActor

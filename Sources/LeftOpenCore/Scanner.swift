@@ -298,7 +298,8 @@ public enum Scanner {
                 rssKB: table?.rssKB)
             let parents = parentChain(for: process, in: processTable)
             let project = process.cwd.flatMap { projects[$0] }
-            let bundle = applicationBundle(for: process, parents: parents, launchedPath: table?.executablePath)
+            let bundle = applicationBundle(for: process, parents: parents,
+                launchedPath: table?.executablePath, project: project)
             let inference = inferOwner(process: process, project: project, bundle: bundle)
             return Activity(listener: listener, process: process, parentChain: parents,
                 projectMarker: project, applicationBundle: bundle,
@@ -437,10 +438,13 @@ public enum Scanner {
 
     /// `launchedPath` is what `ps` reports. It matters when the mapped executable is a copy outside
     /// the bundle, e.g. Chrome runs from `…/code_sign_clone/…/Google Chrome.app.bundle/…`.
-    private static func applicationBundle(for process: ProcessFact, parents: [ProcessFact],
-                                          launchedPath: String?) -> ApplicationBundle? {
+    static func applicationBundle(for process: ProcessFact, parents: [ProcessFact],
+                                  launchedPath: String?, project: ProjectMarker?) -> ApplicationBundle? {
         for path in [process.executablePath, launchedPath].compactMap({ $0 }) {
             if let bundle = bundlePath(path) {
+                // A framework or tool embedded in an app can serve an unrelated project. The
+                // bundle path identifies its runtime provider, not the listener's owner.
+                if project != nil && isEmbeddedRuntime(path, in: bundle.path) { continue }
                 return ApplicationBundle(name: bundle.name, path: bundle.path, sourcePID: process.pid, direct: true)
             }
         }
@@ -448,6 +452,12 @@ public enum Scanner {
             return ApplicationBundle(name: bundle.name, path: bundle.path, sourcePID: parent.pid, direct: false)
         }
         return nil
+    }
+
+    private static func isEmbeddedRuntime(_ executable: String, in bundle: String) -> Bool {
+        let appExecutableDirectory = bundle + "/Contents/MacOS/"
+        let insideFramework = executable.split(separator: "/").contains { $0.lowercased().hasSuffix(".framework") }
+        return !executable.hasPrefix(appExecutableDirectory) || insideFramework
     }
 
     private static func bundlePath(_ path: String) -> (name: String, path: String)? {

@@ -73,7 +73,6 @@ public final class AppSettings: ObservableObject {
     private enum Keys {
         static let refreshInterval = "leftopen.refreshInterval"
         static let menuBarBadgeMode = "leftopen.menuBarBadgeMode"
-        static let ignoredPorts = "leftopen.ignoredPorts"
         static let language = "leftopen.language"
         static let checkForUpdates = "leftopen.checkForUpdates"
         static let safetyProtectionEnabled = "leftopen.safetyProtectionEnabled"
@@ -89,10 +88,6 @@ public final class AppSettings: ObservableObject {
 
     @Published public var menuBarBadgeMode: MenuBarBadgeMode {
         didSet { defaults.set(menuBarBadgeMode.rawValue, forKey: Keys.menuBarBadgeMode) }
-    }
-
-    @Published public var ignoredPorts: [Int] {
-        didSet { defaults.set(ignoredPorts, forKey: Keys.ignoredPorts) }
     }
 
     @Published public var checkForUpdates: Bool {
@@ -124,8 +119,6 @@ public final class AppSettings: ObservableObject {
         let storedBadge = defaults.string(forKey: Keys.menuBarBadgeMode) ?? MenuBarBadgeMode.closable.rawValue
         self.menuBarBadgeMode = MenuBarBadgeMode(rawValue: storedBadge) ?? .closable
 
-        self.ignoredPorts = defaults.array(forKey: Keys.ignoredPorts) as? [Int] ?? []
-
         self.checkForUpdates = defaults.object(forKey: Keys.checkForUpdates) as? Bool ?? true
 
         self.safetyProtectionEnabled = defaults.object(forKey: Keys.safetyProtectionEnabled) as? Bool ?? true
@@ -137,21 +130,5 @@ public final class AppSettings: ObservableObject {
         let storedLanguage = defaults.string(forKey: Keys.language) ?? LanguagePreference.system.rawValue
         self.language = LanguagePreference(rawValue: storedLanguage) ?? .system
         Localization.current = language.resolved
-    }
-
-    public func addIgnoredPort(_ port: Int) {
-        guard port >= 1 && port <= 65535 else { return }
-        if !ignoredPorts.contains(port) {
-            ignoredPorts.append(port)
-            ignoredPorts.sort()
-        }
-    }
-
-    public func removeIgnoredPort(_ port: Int) {
-        ignoredPorts.removeAll { $0 == port }
-    }
-
-    public func isPortIgnored(_ port: Int) -> Bool {
-        ignoredPorts.contains(port)
     }
 }

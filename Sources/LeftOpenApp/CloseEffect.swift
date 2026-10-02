@@ -33,11 +33,3 @@ enum DoorSound {
         }
     }
 }
-
-// Backward compatibility
-@MainActor
-enum CloseEffect {
-    static func playSound() {
-        DoorSound.doorClose.play()
-    }
-}

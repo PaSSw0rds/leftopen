@@ -355,6 +355,42 @@ final class LeftOpenCoreTests: XCTestCase {
         XCTAssertNil(CloseService.protectionReason(for: activity))
     }
 
+    func testProjectRuntimeInsideAppDoesNotBecomeAppOwned() {
+        let project = ProjectMarker(name: "site", root: "/private/tmp/site",
+            source: ".git", markerPath: "/private/tmp/site/.git")
+        let base = fixtureActivity(pid: 42, path: "/opt/homebrew/bin/python3")
+        let runtimes = [
+            ("/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python", "Python"),
+            ("/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python", "Python"),
+            ("/Applications/Tool.app/Contents/Resources/runtime/bin/node", "node"),
+        ]
+        for (path, command) in runtimes {
+            let process = ProcessFact(pid: 42, ppid: 500, command: command, executablePath: path,
+                uid: Int32(getuid()), user: nil, cwd: project.root)
+            let bundle = Scanner.applicationBundle(for: process, parents: [], launchedPath: path, project: project)
+            XCTAssertNil(bundle, "An embedded runtime is not the owner of the project listener")
+            let activity = Activity(listener: base.listener, process: process, parentChain: [],
+                projectMarker: project, applicationBundle: bundle, scope: .local,
+                inference: OwnerInference(label: project.name, category: .project,
+                    confidence: "high", reason: "Project marker."))
+            XCTAssertEqual(PortCategory.classify([activity]), .devServer)
+            XCTAssertNil(CloseService.protectionReason(for: activity))
+        }
+
+        let appPath = "/Applications/Editor.app/Contents/MacOS/Editor"
+        let appProcess = ProcessFact(pid: 42, ppid: 500, command: "Editor", executablePath: appPath,
+            uid: Int32(getuid()), user: nil, cwd: project.root)
+        let appBundle = Scanner.applicationBundle(for: appProcess, parents: [], launchedPath: appPath, project: project)
+        XCTAssertEqual(appBundle?.name, "Editor")
+        XCTAssertEqual(appBundle?.direct, true)
+        let appActivity = Activity(listener: base.listener, process: appProcess, parentChain: [],
+            projectMarker: project, applicationBundle: appBundle, scope: .local,
+            inference: OwnerInference(label: project.name, category: .project,
+                confidence: "high", reason: "Project marker."))
+        XCTAssertEqual(PortCategory.classify([appActivity]), .app)
+        XCTAssertNotNil(CloseService.protectionReason(for: appActivity))
+    }
+
     func testKeepAliveServicesAreRefusedWithAStopCommand() {
         var brew = fixtureActivity(pid: 42, path: "/opt/homebrew/opt/syncthing/bin/syncthing")
         brew.launchdJob = LaunchdJob(label: "homebrew.mxcl.syncthing", pid: 41, keepAlive: true)

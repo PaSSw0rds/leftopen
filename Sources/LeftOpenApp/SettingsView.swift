@@ -8,7 +8,6 @@ struct SettingsView: View {
     @ObservedObject private var updates = UpdateChecker.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    @State private var newPort = ""
     @State private var didCopy = false
     @State private var doorOpen = true
     @State private var volumePreviewTask: Task<Void, Never>?
@@ -35,35 +34,35 @@ struct SettingsView: View {
                     get: { launchAtLogin.isEnabled },
                     set: { _ in launchAtLogin.toggle() }
                 ))
+            } header: {
+                Text(L("General", "通用"))
+            }
+
+            Section {
                 Picker(L("Refresh", "刷新"), selection: $settings.refreshInterval) {
                     ForEach(RefreshInterval.allCases) { Text($0.title).tag($0) }
                 }
                 Picker(L("Menu bar count", "菜单栏数字"), selection: $settings.menuBarBadgeMode) {
                     ForEach(MenuBarBadgeMode.allCases) { Text($0.title).tag($0) }
                 }
-            }
-
-            Section {
-                if !settings.ignoredPorts.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(settings.ignoredPorts, id: \.self) { port in
-                                portChip(port)
-                            }
-                        }
-                    }
-                }
-                TextField(L("Add port", "添加端口"), text: $newPort, prompt: Text(L("e.g. 5432", "例如 5432")))
-                    .onSubmit(addPort)
             } header: {
-                sectionHeader(L("Ignored Ports", "忽略的端口"),
-                    help: L("Hidden from the list and counts. Search still finds them.", "不在列表和计数中显示，搜索时仍能找到。"))
+                sectionHeader(L("Port Monitoring", "端口监控"),
+                    help: L("How often LeftOpen scans and what the menu bar shows.", "设置 LeftOpen 的扫描频率和菜单栏显示内容。"))
             }
 
             Section {
                 Toggle(L("Protect apps and system services", "保护 App 和系统服务"),
                        isOn: $settings.safetyProtectionEnabled.animation(motion))
-                Toggle(L("Play a sound when a port closes", "关闭端口时播放提示音"),
+            } header: {
+                sectionHeader(L("Closing Safety", "关闭安全保护"), help: settings.safetyProtectionEnabled
+                    ? L("Prevents closing app-owned, macOS, and automatically restarted service ports. Project servers remain closable.",
+                        "阻止关闭属于 App、macOS 和会自动重启的服务端口；项目服务器仍可关闭。")
+                    : L("Protection is off. LeftOpen will let you try to close any port owned by your user. Process identity is still rechecked before SIGTERM.",
+                        "保护已关闭。LeftOpen 将允许尝试关闭当前用户的任何端口；发送 SIGTERM 前仍会重新确认进程身份。"))
+            }
+
+            Section {
+                Toggle(L("Play sounds when ports change", "端口变化时播放提示音"),
                        isOn: $settings.soundEffectsEnabled)
                 if settings.soundEffectsEnabled {
                     Slider(value: $settings.soundVolume, in: 0...1) {
@@ -85,11 +84,7 @@ struct SettingsView: View {
                     }
                 }
             } header: {
-                sectionHeader(L("Closing Safety", "关闭安全保护"), help: settings.safetyProtectionEnabled
-                    ? L("Prevents closing app-owned, macOS, and automatically restarted service ports. Project servers remain closable.",
-                        "阻止关闭属于 App、macOS 和会自动重启的服务端口；项目服务器仍可关闭。")
-                    : L("Protection is off. LeftOpen will let you try to close any port owned by your user. Process identity is still rechecked before SIGTERM.",
-                        "保护已关闭。LeftOpen 将允许尝试关闭当前用户的任何端口；发送 SIGTERM 前仍会重新确认进程身份。"))
+                Text(L("Sounds", "声音"))
             }
 
             Section {
@@ -261,31 +256,5 @@ struct SettingsView: View {
             try? await Task.sleep(for: .seconds(2))
             didCopy = false
         }
-    }
-
-    private func portChip(_ port: Int) -> some View {
-        HStack(spacing: 4) {
-            Text(String(port))
-                .font(.system(.callout, design: .monospaced))
-            Button {
-                withAnimation(.snappy(duration: 0.2)) { settings.removeIgnoredPort(port) }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(L("Stop ignoring port \(String(port))", "不再忽略端口 \(String(port))"))
-        }
-        .padding(.leading, 8)
-        .padding(.trailing, 5)
-        .padding(.vertical, 3)
-        .background(Color.primary.opacity(0.07), in: Capsule())
-    }
-
-    private func addPort() {
-        let trimmed = newPort.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let port = Int(trimmed), (1...65535).contains(port) else { return }
-        withAnimation(.snappy(duration: 0.2)) { settings.addIgnoredPort(port) }
-        newPort = ""
     }
 }
