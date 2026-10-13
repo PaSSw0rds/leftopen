@@ -918,9 +918,9 @@ struct MenuPanel: View {
 
     private var vanishedPage: some View {
         VStack(spacing: 6) {
-            Image(systemName: "door.left.hand.closed")
-                .font(.title2)
-                .foregroundStyle(.secondary)
+            DancingDogView(isAnimated: !reduceMotion)
+                .frame(width: 56, height: 56)
+                .accessibilityLabel(L("Dancing dog", "跳舞的小狗"))
                 .padding(.bottom, 4)
             Text(L("No longer listening", "已不再监听")).font(.headline)
             Text(L("It went away during the last refresh.", "它在上次刷新时已经退出。"))
@@ -932,6 +932,23 @@ struct MenuPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(20)
+    }
+
+    private struct DancingDogView: NSViewRepresentable {
+        let isAnimated: Bool
+
+        func makeNSView(context: Context) -> NSImageView {
+            let imageView = NSImageView()
+            imageView.image = Bundle.module.url(forResource: "DancingDog", withExtension: "gif")
+                .flatMap(NSImage.init(contentsOf:))
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.animates = isAnimated
+            return imageView
+        }
+
+        func updateNSView(_ imageView: NSImageView, context: Context) {
+            imageView.animates = isAnimated
+        }
     }
 
     // MARK: - Review Pages
