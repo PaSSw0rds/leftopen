@@ -919,7 +919,8 @@ struct MenuPanel: View {
     private var vanishedPage: some View {
         VStack(spacing: 6) {
             DancingDogView(isAnimated: !reduceMotion)
-                .frame(width: 56, height: 56)
+                .frame(width: 40, height: 40)
+                .clipped()
                 .accessibilityLabel(L("Dancing dog", "跳舞的小狗"))
                 .padding(.bottom, 4)
             Text(L("No longer listening", "已不再监听")).font(.headline)
@@ -948,6 +949,10 @@ struct MenuPanel: View {
 
         func updateNSView(_ imageView: NSImageView, context: Context) {
             imageView.animates = isAnimated
+        }
+
+        func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSImageView, context: Context) -> CGSize? {
+            CGSize(width: proposal.width ?? 40, height: proposal.height ?? 40)
         }
     }
 

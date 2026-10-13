@@ -46,6 +46,9 @@ enum PanelSnapshot {
                 }
             }
             try? await Task.sleep(for: .seconds(4))
+            if ProcessInfo.processInfo.environment["LEFTOPEN_SNAPSHOT_PAGE"] == "vanished" {
+                model.selectedActivityID = "snapshot-vanished"
+            }
 
             // ImageRenderer only draws pure SwiftUI (AppKit-backed controls become placeholders),
             // so host the panel in an invisible window and let AppKit rasterise it at 2x.
