@@ -728,9 +728,12 @@ public enum Scanner {
         }
     }
 
-    private static func findProject(_ cwd: String) -> ProjectMarker? {
+    /// `cwd` comes from lsof as an absolute, already-resolved path. Do not standardize it:
+    /// Foundation rewrites `/private/tmp` to `/tmp`, which then fails the `within(cwd, root)` check.
+    static func findProject(_ cwd: String) -> ProjectMarker? {
         guard cwd.hasPrefix("/"), cwd != "/" else { return nil }
-        var directory = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        var directory = cwd
+        while directory.count > 1, directory.hasSuffix("/") { directory.removeLast() }
         let markers = [
             ".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
             "Package.swift", "pubspec.yaml", "Gemfile", "mix.exs", "composer.json",
