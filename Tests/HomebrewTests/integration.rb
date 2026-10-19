@@ -1,56 +1,47 @@
 # Run with `brew ruby Tests/HomebrewTests/integration.rb`.
-# Real Homebrew DSL/artifact dispatch, but EVERY external command is intercepted.
+# Inspect real Homebrew artifacts and saved metadata; never uninstall anything.
 require "cask/cask_loader"
 require "tmpdir"
-require "fileutils"
+require "stringio"
 
-calls = []
-failure = false
-SystemCommand.define_singleton_method(:run!) do |executable, **options|
-  calls << [executable, options]
-  raise "simulated authorization cancellation" if failure
-  nil
+# Fail immediately if loading or serializing the cask tries to run any command.
+%i[run run!].each do |method|
+  SystemCommand.define_singleton_method(method) do |*args, **options|
+    raise "Unexpected external command during cask inspection"
+  end
 end
 
 Dir.mktmpdir("leftopen-cask-test-") do |directory|
-  executable = File.join(directory, "LeftOpen.app/Contents/MacOS/LeftOpenApp")
-  FileUtils.mkdir_p(File.dirname(executable))
-  File.write(executable, "never executed\n")
-  File.chmod(0o700, executable)
   config = Cask::Config.new(explicit: { appdir: directory })
   content = File.read(File.expand_path("../../Resources/Homebrew/leftopen.rb", __dir__))
-  cask = Cask::CaskLoader::FromContentLoader.new(content).load(config: config)
-  # An installed receipt can override initial config; keep this fixture isolated.
-  cask.config = config
-  flight = cask.artifacts.find { |artifact| artifact.is_a?(Cask::Artifact::AbstractFlightBlock) }
-  raise "No uninstall preflight" unless flight
-  raise "Preflight must precede app removal" unless cask.artifacts.to_a.index(flight) <
-    cask.artifacts.to_a.index { |artifact| artifact.is_a?(Cask::Artifact::App) }
-  previous = ENV.delete("LEFTOPEN_UNINSTALL_CLEANED")
+  # Avoid importing the real installed LeftOpen receipt during JSON loading.
+  content = content.sub('cask "leftopen"', 'cask "leftopen-package-policy-test"')
+  warnings = StringIO.new
+  original_stderr = $stderr
   begin
-    %w[upgrade reinstall cleanup autoremove install].each do |operation|
-      Homebrew.running_command = operation
-      flight.uninstall_phase(upgrade: operation == "upgrade", reinstall: operation == "reinstall")
-    end
-    raise "Unexpected cleanup during upgrade/reinstall" unless calls.empty?
-    Homebrew.running_command = "uninstall"
-    flight.uninstall_phase
-    command, options = calls.fetch(0)
-    raise "Wrong helper: #{command.inspect}, args #{options[:args].inspect}; expected #{executable}" unless command == executable && options[:args] == ["--homebrew-cleanup"]
-    raise "Wrong authorization/failure policy" unless options[:sudo] == false && options[:must_succeed] == true
-    failure = true
-    begin
-      flight.uninstall_phase(force: true)
-      raise "Cancellation did not stop uninstall"
-    rescue RuntimeError => error
-      raise unless error.message == "simulated authorization cancellation"
-    end
-    ENV["LEFTOPEN_UNINSTALL_CLEANED"] = "1"
-    count = calls.length
-    flight.uninstall_phase
-    raise "Native app handoff recursed" unless calls.length == count
+    $stderr = warnings
+    cask = Cask::CaskLoader::FromContentLoader.new(content).load(config: config)
+    cask.config = config
+    expected = [Cask::Artifact::App, Cask::Artifact::Binary, Cask::Artifact::Zap]
+    raise "Unexpected executable cleanup artifact" unless cask.artifacts.map(&:class).sort_by(&:name) == expected.sort_by(&:name)
+    raise "Legacy Ruby receipt required" if cask.uninstall_flight_blocks?
+
+    # Combine the JSON cask metadata with artifacts saved in the installation tab.
+    receipt = cask.to_installed_json_hash.merge(
+      "version" => cask.version.to_s, "artifacts" => cask.artifacts_list(uninstall_only: true),
+    )
+    path = Pathname(directory)/"leftopen-package-policy-test.json"
+    path.write(JSON.generate(receipt))
+    restored = Cask::CaskLoader::FromAPILoader.new(
+      "leftopen-package-policy-test", from_json: JSON.parse(path.read), path: path,
+      from_installed_caskfile: true, api_fallback: false,
+    ).load(config: config)
+    raise "Cleanup artifact in installed receipt" unless restored.artifacts.map(&:class).sort_by(&:name) == expected.sort_by(&:name)
+    raise "Uninstall flight block in receipt" if restored.uninstall_flight_blocks?
+    raise "Missing complete-removal guidance" unless cask.caveats.to_s.include?("Settings > About > Uninstall LeftOpen")
   ensure
-    previous.nil? ? ENV.delete("LEFTOPEN_UNINSTALL_CLEANED") : ENV["LEFTOPEN_UNINSTALL_CLEANED"] = previous
+    $stderr = original_stderr
   end
+  raise "Cask emitted a deprecation warning: #{warnings.string}" if warnings.string.match?(/deprecated|uninstall_preflight/i)
 end
-puts "Real Homebrew preflight dispatch passed; no cleanup commands executed."
+puts "Homebrew package-only artifacts and JSON receipt passed; no cleanup commands executed."
