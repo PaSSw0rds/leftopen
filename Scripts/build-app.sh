@@ -2,7 +2,11 @@
 set -euo pipefail
 
 project_dir="${0:A:h:h}"
-output_dir="${LEFTOPEN_OUTPUT_DIR:-${project_dir}/dist}"
+# No explicit destination means a managed local test build. CI/releases set their own.
+if [[ -z "${LEFTOPEN_OUTPUT_DIR:-}" ]]; then
+  exec python3 "${project_dir}/Scripts/dev-app.py" build
+fi
+output_dir="${LEFTOPEN_OUTPUT_DIR}"
 app_path="${output_dir}/LeftOpen.app"
 bundle_id="${LEFTOPEN_BUNDLE_ID:-app.leftopen.mac}"
 
@@ -47,6 +51,10 @@ mkdir -p "${app_path}/Contents/Resources/Portless"
 cp -R "${project_dir}/.build/portless-runtime/." "${app_path}/Contents/Resources/Portless/"
 zsh "${project_dir}/Scripts/sign-portless-runtime.sh" "${app_path}/Contents/Resources/Portless"
 plutil -replace CFBundleIdentifier -string "$bundle_id" "${app_path}/Contents/Info.plist"
+if [[ -n "${LEFTOPEN_APP_DISPLAY_NAME:-}" ]]; then
+  plutil -replace CFBundleDisplayName -string "$LEFTOPEN_APP_DISPLAY_NAME" "${app_path}/Contents/Info.plist"
+  plutil -replace CFBundleName -string "$LEFTOPEN_APP_DISPLAY_NAME" "${app_path}/Contents/Info.plist"
+fi
 swift "${project_dir}/Scripts/legacy-app-icon.swift" verify "${project_dir}/Resources/AppIcon.icns" "$app_path"
 # Sign nested code before the bundle, which signs the main executable too.
 codesign --force --sign - "${app_path}/Contents/MacOS/leftopen"

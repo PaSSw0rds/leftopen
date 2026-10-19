@@ -152,9 +152,17 @@ LOCAL = this Mac only · LAN = may be reachable from your local network
 # 运行测试
 swift test
 
-# 本地编译 App
-LEFTOPEN_OUTPUT_DIR=dist/dev Scripts/build-app.sh
+# 构建唯一的本地测试 App（.build/local-app.noindex）
+Scripts/build-app.sh
+
+# 构建、运行，退出后自动清理
+python3 Scripts/dev-app.py run
+
+# 清理仅构建、尚未运行的测试 App
+python3 Scripts/dev-app.py clean
 ```
+
+本地构建名为 **LeftOpen Test**，使用独立 bundle ID，不会安装到 `/Applications`。清理只处理脚本管理的输出目录，发现 App 或内置进程仍在运行时会拒绝删除，请先退出测试版。固定地址服务和其他用户数据不会被重置。CI 与正式打包继续显式指定 `LEFTOPEN_OUTPUT_DIR`；日常测试请勿再生成多个 `dist/` 版本目录。
 
 ---
 

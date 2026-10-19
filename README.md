@@ -153,9 +153,17 @@ Maintainers: [one-click releases](docs/releasing.md).
 # Tests
 swift test
 
-# Build the app locally
-LEFTOPEN_OUTPUT_DIR=dist/dev Scripts/build-app.sh
+# Build one replaceable local test app (hidden .build/local-app.noindex)
+Scripts/build-app.sh
+
+# Build, run, and remove the test app when it exits
+python3 Scripts/dev-app.py run
+
+# Remove a build-only test app
+python3 Scripts/dev-app.py clean
 ```
+
+Local builds use the name **LeftOpen Test** and a separate bundle identifier. They never install into `/Applications`. Cleanup refuses active app/runtime processes and only removes its managed output. Quit the test app before cleaning. Fixed-address services and other user data are not reset. CI and release packaging continue to set an explicit `LEFTOPEN_OUTPUT_DIR`; do not use versioned `dist/` folders for routine local tests.
 
 ---
 
