@@ -161,3 +161,10 @@ LEFTOPEN_OUTPUT_DIR=dist/dev Scripts/build-app.sh
 ## 许可证
 
 [MIT License](LICENSE)
+
+## 卸载
+
+完整卸载请使用 **LeftOpen → 设置 → 关于 → 卸载 LeftOpen…**。
+直接运行 `brew uninstall` 只移除应用和 CLI，可能留下后台服务、证书和配置。
+如果已删除应用，请重新安装后使用应用内卸载功能。
+详见[完整卸载说明](docs/uninstall.md)。

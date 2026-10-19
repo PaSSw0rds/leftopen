@@ -52,6 +52,7 @@ final class UninstallManager: ObservableObject {
             }
             if let brew {
                 // Let Homebrew remove its Caskroom entry and CLI link, not only the app bundle.
+                // Keep the cleaned flag for older receipts that still contain the cleanup hook.
                 try await Task.detached(priority: .utility) {
                     let result = try execute(brew, ["uninstall", "--cask", "--zap", "songhaifan/tap/leftopen"],
                         extraEnvironment: ["HOMEBREW_NO_AUTOREMOVE": "1", "HOMEBREW_NO_AUTO_UPDATE": "1",

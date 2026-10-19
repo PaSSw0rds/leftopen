@@ -162,3 +162,10 @@ LEFTOPEN_OUTPUT_DIR=dist/dev Scripts/build-app.sh
 ## License
 
 [MIT License](LICENSE)
+
+## Uninstall
+
+For complete removal, use **LeftOpen → Settings → About → Uninstall LeftOpen…**.
+Direct `brew uninstall` only removes the app and CLI; services, certificates and
+settings may remain. If already removed, reinstall the app and use its uninstaller.
+See [complete uninstall](docs/uninstall.md).

@@ -71,35 +71,36 @@ preferences, command-launch and app-removal failures have separate stages.
 
 ## Distribution boundary
 
-The uninstall action is explicit and is never called by the updater, app startup,
-Homebrew upgrade, or reinstall. Starting with the 0.5.4 cask, standalone
-`brew uninstall leftopen` (also `--cask` or `--zap`) runs the same cleaner before
-Homebrew removes the app and CLI. Quit LeftOpen and stop projects launched by it
-first. Cleanup refuses a running app or bundled project runtime instead of killing
-projects. macOS authorization can still be required; cancellation/failure aborts
-removal, leaving the app for retry. Do not use `sudo brew`.
+Complete cleanup belongs to the app's **Settings → About → Uninstall LeftOpen…**
+action. Homebrew manages the app bundle, CLI link and package receipt; it does not
+run the cleaner during uninstall, upgrade or reinstall. Direct `brew uninstall`
+(including `--zap`) may leave the background address service, certificates, saved
+addresses and settings. `--zap` only additionally removes saved window state.
+If you already removed the app, reinstall it and use its Uninstall action to finish
+cleanup. Dragging the app to Trash does not invoke the cleaner either.
 
-The tap's preflight checks Homebrew's normalized `running_command_with_args`; only explicit
-`uninstall` runs cleanup. Upgrade, reinstall, install and automatic dependency
-removal do not erase user state. The cleanup-only app entry never starts SwiftUI
-or calls brew. The native app performs cleanup itself and passes a private
-`LEFTOPEN_UNINSTALL_CLEANED=1` environment flag only to its brew child to prevent
-duplicate cleanup. Do not set this flag in your shell.
+Quit projects launched through LeftOpen before using the app's uninstaller.
+Authorization cancellation or cleanup failure stops package removal and leaves
+the app available for retry. Do not use `sudo brew`.
 
-Homebrew uses the cask metadata saved at installation time. Existing 0.5.3 and
-older installations need `brew upgrade --cask songhaifan/tap/leftopen` to receive
-the new hook; `brew update` alone cannot retrofit their uninstall receipt.
-The released cask is generated from `Resources/Homebrew/leftopen.rb` with the
-verified release version and checksum, so later releases preserve the hook.
-Dragging the app to Trash also does not invoke the cleaner. No watcher is installed.
+Older Homebrew installation receipts can still contain the former cleanup hook.
+The app retains its cleanup-only entry point and private child-process
+`LEFTOPEN_UNINSTALL_CLEANED=1` handoff for compatibility with those receipts.
+Do not set this flag in your shell. New casks have no uninstall flight block.
+Homebrew uses metadata saved at installation time, so updating the tap alone does
+not remove the old hook from an existing receipt. After the updated cask is
+published, an upgrade or reinstall refreshes that receipt without cleaning user
+state. The cask is generated from `Resources/Homebrew/leftopen.rb` with the release
+version and checksum.
 
 ## Validation
 
 `node --test Tests/PortlessTests/*.test.mjs` covers exact daemon ownership, host
 preservation, malformed markers, exact certificate deletion, cancellation/keychain
 errors, filesystem links, another owner and refusal of non-root execution.
-`ruby Tests/HomebrewTests/uninstall_test.rb` covers hook dispatch, preservation
-during upgrade/reinstall, native handoff, missing helper and cleanup failures.
+`ruby Tests/HomebrewTests/uninstall_test.rb` checks the package-only cask contract
+and complete-removal guidance. `brew ruby Tests/HomebrewTests/integration.rb`
+checks the real Homebrew artifacts and JSON receipt for the absence of cleanup hooks.
 Swift tests cover early argument dispatch and refusal of orphaned app runtimes.
 The Swift package and universal app build validate native integration.
 `orphan-recovery.test.mjs` executes the actual setup/uninstall entrypoints with
