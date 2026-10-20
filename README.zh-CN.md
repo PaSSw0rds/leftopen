@@ -77,7 +77,7 @@ brew install --cask songhaifan/tap/leftopen
 工作方式：
 
 - **确认后才转发。** 跟随端口变化前，核对项目目录、可执行文件、工作目录、参数摘要和当前监听进程。归属不明确或无关的监听者、仅 HTTPS 的上游和非 Web 端口不会被转发。开发服务器拒绝新主机名时在详情中显示原因，不修改项目文件。
-- **启动已停止的项目。** 已保存但未运行的项目有开发脚本时显示 **启动**，使用 Portless 自身的启动器（分配空闲端口、适配框架参数、区分 worktree）。不从进程参数猜启动命令；没有脚本的项目显示 **打开项目**。
+- **启动已停止的项目。** 已保存但未运行的项目有开发脚本时显示 **启动**，使用 Portless 自身的启动器（分配空闲端口、适配框架参数、区分 worktree）。没有开发脚本的项目可在 `.claude/launch.json` 中声明启动命令（`runtimeExecutable`、`runtimeArgs`、`port`），仅在你点击 **启动** 时通过 `portless run` 运行，不经过 shell。`portless.json` 和 `package.json` 的 `"portless"` 字段由 Portless 自身读取。不从进程参数猜启动命令；两者都没有的项目显示 **打开项目**。
 - **短期租约，而非永久规则。** 扫描到的服务使用短期映射，LeftOpen 停止扫描后失效，下次打开时恢复。停用地址不会停止项目。HTTPS 服务在退出 App 后仍保留；443 已被占用时显示原因，不抢占。
 - **供 Agent 与脚本使用：** `leftopen url [名称|端口|路径]` 输出已确认的地址（加 `--json` 获取结构化结果），`leftopen --json` 为对应服务增加 `fixedURL`。
 

@@ -490,7 +490,8 @@ final class FixedAddressManager: ObservableObject {
         resolvedActivities = selected.mapValues(\.id)
         selectedServices = selected
         for binding in bindings where selected[binding.id] == nil {
-            if let info = try? await service.projectInfo(root: binding.projectRoot), info.canStart {
+            if let info = try? await service.projectInfo(root: binding.projectRoot),
+               info.canStart || service.launchCommand(for: binding) != nil {
                 launchable.insert(binding.id)
             } else { launchable.remove(binding.id) }
         }

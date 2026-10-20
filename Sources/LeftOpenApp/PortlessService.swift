@@ -325,18 +325,31 @@ actor PortlessService {
         return try JSONDecoder().decode([Portless.Route].self, from: data)
     }
 
+    /// A project's own `.claude/launch.json` entry, used only when it has no Portless-runnable script.
+    nonisolated func launchCommand(for binding: FixedAddressBinding) -> LaunchCommand? {
+        LaunchConfiguration.command(in: LaunchConfiguration.commands(projectRoot: binding.projectRoot),
+                                    preferredPort: binding.preferredPort)
+    }
+
     func start(_ binding: FixedAddressBinding) throws -> Int32 {
         if let job = jobs[binding.id], job.isRunning { return job.processIdentifier }
         let info = try projectInfo(root: binding.projectRoot)
-        guard info.canStart else {
+        let launch = info.canStart ? nil : launchCommand(for: binding)
+        guard info.canStart || launch != nil else {
             throw PortlessServiceError(message: L("This project has no configured development script. Open the project to start it.",
                                                   "此项目没有配置开发脚本，请打开项目后启动。"))
         }
         let task = Process()
         task.executableURL = node
         var arguments = [runtime.appendingPathComponent("package/dist/cli.js").path]
-        if info.workspace { arguments += ["--script", info.script] }
-        else { arguments += ["run", "--name", binding.launchName ?? info.baseName, "--script", info.script] }
+        let name = binding.launchName ?? info.baseName
+        if let launch {
+            // Declared by the project for coding agents; Portless shell-escapes each argument.
+            arguments += ["run", "--name", name]
+            if let port = launch.port { arguments += ["--app-port", String(port)] }
+            arguments += ["--", launch.executable] + launch.arguments
+        } else if info.workspace { arguments += ["--script", info.script] }
+        else { arguments += ["run", "--name", name, "--script", info.script] }
         task.arguments = arguments
         task.currentDirectoryURL = URL(fileURLWithPath: binding.projectRoot)
         var env = environment
