@@ -527,11 +527,19 @@ struct MenuPanel: View {
                             .help(running ? L("Open \(binding.name).localhost", "打开 \(binding.name).localhost")
                                   : fixed.launchable.contains(binding.id)
                                   ? L("Start and open \(binding.name).localhost", "启动并打开 \(binding.name).localhost")
-                                  : L("Start this project to open its address", "项目运行后即可打开固定地址"))
+                                  : L("Start this project to open its address. Right-click to copy a setup prompt for your AI agent.", "项目运行后即可打开固定地址。右键可复制给 AI 的设置提示词。"))
                             .accessibilityLabel(binding.name)
                             .accessibilityValue(running ? L("Running", "运行中") : L("Not running", "未运行"))
                             .opacity(shortcutDrag.id == binding.id ? 0 : 1)
                             .contextMenu {
+                                if activity == nil && !running && !fixed.launchable.contains(binding.id) {
+                                    Button(L("Copy Setup Prompt for AI", "复制给 AI 的设置提示词")) {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(
+                                            LaunchSetupPrompt.text(projectRoot: binding.projectRoot, port: binding.preferredPort),
+                                            forType: .string)
+                                    }
+                                }
                                 Button(L("Disable Fixed Address", "停用固定地址")) { Task { await fixed.disable(binding) } }
                                     .disabled(fixed.isWorking)
                             }

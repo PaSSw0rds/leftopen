@@ -56,3 +56,16 @@ final class LaunchConfigurationTests: XCTestCase {
         XCTAssertTrue(LaunchConfiguration.commands(projectRoot: root).isEmpty)
     }
 }
+
+final class LaunchSetupPromptTests: XCTestCase {
+    func testPromptNamesProjectPortAndFileAndIsParseableExample() {
+        let text = LaunchSetupPrompt.text(projectRoot: "/Users/test/app", port: 8765)
+        XCTAssertTrue(text.contains("/Users/test/app"))
+        XCTAssertTrue(text.contains("8765"))
+        XCTAssertTrue(text.contains(".claude/launch.json"))
+        // The embedded example must be accepted by LeftOpen's own parser.
+        let start = text.range(of: "{")!.lowerBound
+        let end = text.range(of: "\n}", range: start..<text.endIndex)!.upperBound
+        XCTAssertEqual(LaunchConfiguration.parse(Data(text[start..<end].utf8)).first?.port, 5173)
+    }
+}
