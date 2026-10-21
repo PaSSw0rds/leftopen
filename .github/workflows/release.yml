@@ -7,6 +7,14 @@ on:
         description: 'New version (for example: 0.4.1)'
         required: true
         type: string
+      prerelease:
+        description: 'Beta only: do not update Latest or Homebrew'
+        type: boolean
+        default: false
+      beta_number:
+        description: 'Beta sequence number (used only for prereleases)'
+        type: string
+        default: '1'
 
 concurrency:
   group: leftopen-release
@@ -20,7 +28,26 @@ defaults:
     shell: bash
 
 jobs:
+  runtime:
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify hardened Node and Portless on native hardware
+        run: |
+          python3 Scripts/prepare-portless-runtime.py
+          zsh Scripts/sign-portless-runtime.sh .build/portless-runtime
+          python3 Scripts/verify-portless-runtime.py .build/portless-runtime
+
   release:
+    needs: runtime
     if: github.ref == 'refs/heads/main'
     runs-on: macos-15
     timeout-minutes: 45
@@ -31,6 +58,8 @@ jobs:
       sha256: ${{ steps.archive.outputs.sha256 }}
     env:
       VERSION: ${{ inputs.version }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      BETA_NUMBER: ${{ inputs.beta_number }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       LEFTOPEN_BUNDLE_ID: app.leftopen.mac
@@ -69,6 +98,11 @@ jobs:
           latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)"
           python3 Scripts/prepare-release.py "$VERSION" "$((1000 + GITHUB_RUN_NUMBER))" --latest "$latest"
           tag="v$VERSION"
+          if [[ "$PRERELEASE" == true ]]; then
+            [[ "$BETA_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo '::error::Invalid beta sequence number.'; exit 1; }
+            tag="$tag-beta.$BETA_NUMBER"
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           if git show-ref --verify --quiet "refs/tags/$tag"; then
             if [[ "$(git rev-parse "$tag^{commit}")" != "$GITHUB_SHA" ]]; then
               echo '::error::This version tag belongs to another commit.'
@@ -79,6 +113,9 @@ jobs:
       - name: Test
         run: |
           python3 -m unittest discover -s Tests/ReleaseTests
+          python3 Tests/test_legacy_app_icon.py
+          ruby Tests/HomebrewTests/uninstall_test.rb
+          brew ruby Tests/HomebrewTests/integration.rb
           swift test
 
       - name: Build Universal app and CLI
@@ -118,7 +155,9 @@ jobs:
           ditto -x -k LeftOpen-release.zip verified
           app="$LEFTOPEN_OUTPUT_DIR/verified/LeftOpen.app"
           "$GITHUB_WORKSPACE/Scripts/verify-universal-app.sh" "$app"
+          swift "$GITHUB_WORKSPACE/Scripts/legacy-app-icon.swift" verify "$GITHUB_WORKSPACE/Resources/AppIcon.icns" "$app"
           codesign --verify --deep --strict --all-architectures "$app"
+          python3 "$GITHUB_WORKSPACE/Scripts/verify-portless-runtime.py" "$app/Contents/Resources/Portless"
           xcrun stapler validate "$app"
           spctl --assess --type execute "$app"
           [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" == "$VERSION" ]]
@@ -128,7 +167,7 @@ jobs:
 
       - name: Publish verified release
         run: |
-          tag="v$VERSION"
+          tag="$RELEASE_TAG"
           # A network/auth error must not be treated as an absent release.
           releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | [.tag_name, .draft] | @tsv')"
           state="$(printf '%s\n' "$releases" | awk -F '\t' -v tag="$tag" '$1 == tag { print $2 }')"
@@ -137,14 +176,22 @@ jobs:
             exit 1
           fi
           if [[ -z "$state" ]]; then
+            channel_args=()
+            if [[ "$PRERELEASE" == true ]]; then
+              channel_args=(--prerelease --latest=false)
+            fi
             gh release create "$tag" --target "$GITHUB_SHA" --draft \
-              --title "LeftOpen $tag" --generate-notes
+              --title "LeftOpen $tag" --generate-notes "${channel_args[@]}"
           else
             target="$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)"
             [[ "$target" == "$GITHUB_SHA" ]] || { echo '::error::Draft belongs to another commit.'; exit 1; }
           fi
           gh release upload "$tag" "$LEFTOPEN_OUTPUT_DIR/LeftOpen-release.zip" "$LEFTOPEN_OUTPUT_DIR/SHA256SUMS" --clobber
-          gh release edit "$tag" --draft=false --latest
+          if [[ "$PRERELEASE" == true ]]; then
+            gh release edit "$tag" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$tag" --draft=false --prerelease=false --latest
+          fi
           echo "Published [$tag](https://github.com/$GH_REPO/releases/tag/$tag)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove temporary signing credentials
@@ -157,6 +204,7 @@ jobs:
 
   homebrew:
     needs: release
+    if: ${{ !inputs.prerelease }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -168,6 +216,14 @@ jobs:
           repository: SonghaiFan/homebrew-tap
           ref: main
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Read cask template from the released source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .leftopen-release-source
+          persist-credentials: false
 
       - name: Update cask
         run: |
@@ -185,6 +241,7 @@ jobs:
               raise SystemExit('Refusing to downgrade a newer Homebrew release')
           if not re.fullmatch(r'[0-9a-f]{64}', os.environ['SHA256']):
               raise SystemExit('Missing or invalid release checksum')
+          source = Path('.leftopen-release-source/Resources/Homebrew/leftopen.rb').read_text()
           for name, value in [('version', os.environ['VERSION']), ('sha256', os.environ['SHA256'])]:
               source, count = re.subn(rf'(?m)^(  {name} )"[^"]+"$', lambda m: f'{m[1]}"{value}"', source)
               if count != 1:

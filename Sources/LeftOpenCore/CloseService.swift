@@ -130,6 +130,10 @@ public enum CloseService {
             guard !protected.contains(where: { path.hasPrefix($0) }) else {
                 throw CloseError(L("PID \(target.pid) uses an operating-system executable; refusing to close it.", "PID \(target.pid) 是系统程序，拒绝关闭。"))
             }
+            if activity.editorPreview != nil, let bundle = activity.applicationBundle {
+                throw CloseError(L("Stop this preview in \(bundle.name). It shares the editor’s process, so closing it here could disrupt other editor features.",
+                                   "请在 \(bundle.name) 中停止预览。它与编辑器共用进程，在此关闭会影响编辑器的其他功能。"))
+            }
             if let bundle = activity.applicationBundle,
                bundle.direct || activity.projectMarker == nil {
                 throw CloseError(L("PID \(target.pid) belongs to an application bundle; refusing to disrupt the app.", "PID \(target.pid) 属于一个 App，为避免影响该 App，拒绝关闭。"))
@@ -155,6 +159,11 @@ public enum CloseService {
               activity.process.executablePath == plan.executablePath else {
             throw CloseError(L("PID \(plan.pid) changed identity since the preview; nothing was signalled.", "PID \(plan.pid) 在确认后身份已变化，未发送任何信号。"))
         }
+        let ports = Set(activities.filter { $0.process.pid == plan.pid }.map(\.listener.port))
+        guard ports.isSubset(of: Set(plan.otherPorts + [plan.port])) else {
+            throw CloseError(L("This process opened additional ports. Try a gentle close again to review them.",
+                               "此进程新增了监听端口，请重新尝试轻轻关闭并查看影响范围。"))
+        }
         try validate(activity: activity, currentUID: Int32(getuid()), currentPID: getpid(),
                      safetyProtectionEnabled: plan.safetyProtectionEnabled)
     }
@@ -175,11 +184,7 @@ public enum CloseService {
         }
         let plan = offer.plan
         try verify(plan: plan, activities: activities, freshStartTime: freshStartTime)
-        let ports = Set(activities.filter { $0.process.pid == plan.pid }.map(\.listener.port))
-        guard ports.isSubset(of: Set(plan.otherPorts + [plan.port])) else {
-            throw CloseError(L("This process opened additional ports. Try a gentle close again to review them.",
-                               "此进程新增了监听端口，请重新尝试轻轻关闭并查看影响范围。"))
-        }
+
     }
 
     // Injectable system boundaries let tests verify signal ordering without killing real processes.
@@ -272,3 +277,4 @@ public enum CloseService {
         return value.isEmpty ? nil : value
     }
 }
+

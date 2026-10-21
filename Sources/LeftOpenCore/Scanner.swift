@@ -26,7 +26,8 @@ enum CommandRunner {
 
     static func output(_ executable: String, _ arguments: [String], allowEmptyLsof: Bool = false,
                        timeout: TimeInterval = defaultTimeout,
-                       maxOutputBytes: Int = defaultMaxOutputBytes) throws -> String {
+                       maxOutputBytes: Int = defaultMaxOutputBytes,
+                       environment: [String: String]? = nil) throws -> String {
         guard FileManager.default.isExecutableFile(atPath: executable) else {
             throw ScanError.missingTool(executable)
         }
@@ -34,6 +35,7 @@ enum CommandRunner {
         let stdout = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if let environment { process.environment = environment }
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
         let exited = DispatchSemaphore(value: 0)
@@ -265,7 +267,8 @@ public enum Scanner {
         let listeners = try scanListeners()
         let pids = Array(Set(listeners.map(\.pid))).sorted()
         let cwdByPID = try descriptorFacts(pids, "cwd")
-        let executableByPID = try descriptorFacts(pids, "txt")
+        let mappedPathsByPID = try descriptorPaths(pids, "txt")
+        let executableByPID = mappedPathsByPID.compactMapValues { $0.first }
         let argumentsByPID = commandArguments(pids)
         var limitations: [String] = []
         let processTable: [Int32: ProcessFact]
@@ -300,23 +303,39 @@ public enum Scanner {
             let project = process.cwd.flatMap { projects[$0] }
             let bundle = applicationBundle(for: process, parents: parents,
                 launchedPath: table?.executablePath, project: project)
-            let inference = inferOwner(process: process, project: project, bundle: bundle)
-            return Activity(listener: listener, process: process, parentChain: parents,
+            let preview = bundle?.direct == true
+                ? EditorPreview.detect(listener, mappedPaths: mappedPathsByPID[listener.pid] ?? []) : nil
+            let inference: OwnerInference
+            if let preview, project == nil {
+                inference = OwnerInference(label: preview.name, category: .service, confidence: "high",
+                    reason: L("Verified Live Server reload code on this listener, hosted by \(bundle?.name ?? "an editor"). Its project folder is unknown; the shared editor process remains protected.",
+                              "此端口已验证 Live Server 刷新代码，由 \(bundle?.name ?? "编辑器") 托管。项目目录未知；共享编辑器进程仍受保护。"))
+            } else {
+                inference = inferOwner(process: process, project: project, bundle: bundle)
+            }
+            var activity = Activity(listener: listener, process: process, parentChain: parents,
                 projectMarker: project, applicationBundle: bundle,
                 scope: listenerScope(listener.addresses), inference: inference,
                 launchdJob: launchdJobs[listener.pid] ?? process.ppid.flatMap { launchdJobs[$0] })
+            activity.editorPreview = preview
+            return activity
         }
         return ScanSnapshot(activities: resolveContainers(activities), limitations: limitations)
     }
 
-    /// Forwarded ports name their container once the Engine API or `docker ps` can match them; the
-    /// runtime keeps naming the row otherwise.
-    private static func resolveContainers(_ activities: [Activity]) -> [Activity] {
-        let forwarded = Set(activities.filter(PortCategory.isContainerRuntime).map(\.listener.port))
-        let containers = ContainerResolver.containers(for: forwarded)
+    /// Resolve only verified local forwarders, then repeat the endpoint/address guard on assignment.
+    /// Native processes sharing a numeric port must never inherit container metadata.
+    static func resolveContainers(_ activities: [Activity],
+                                  lookup: ([Activity]) -> [String: ContainerInfo] = ContainerResolver.containers,
+                                  endpoint: (Activity) -> ContainerEndpoint? = { ContainerResolver.verifiedEndpoint(for: $0) }) -> [Activity] {
+        let forwarded = activities.filter { endpoint($0) != nil }
+        let containers = lookup(forwarded)
         guard !containers.isEmpty else { return activities }
         return activities.map { activity in
-            guard let container = containers[activity.listener.port] else { return activity }
+            guard let verified = endpoint(activity), let container = containers[activity.id],
+                  container.endpoint == verified,
+                  ContainerResolver.match(activity.listener, in: [container])?.identity == container.identity
+            else { return activity }
             let detail = container.composeProject.map { project in
                     L("compose project \(project)", "compose 项目 \(project)")
                 } ?? container.image
@@ -388,7 +407,11 @@ public enum Scanner {
     }
 
     private static func descriptorFacts(_ pids: [Int32], _ descriptor: String) throws -> [Int32: String] {
-        var results: [Int32: String] = [:]
+        try descriptorPaths(pids, descriptor).compactMapValues { $0.first }
+    }
+
+    private static func descriptorPaths(_ pids: [Int32], _ descriptor: String) throws -> [Int32: [String]] {
+        var results: [Int32: [String]] = [:]
         for start in stride(from: 0, to: pids.count, by: 100) {
             let chunk = pids[start..<min(start + 100, pids.count)]
             let output = try CommandRunner.output("/usr/sbin/lsof",
@@ -399,8 +422,8 @@ public enum Scanner {
                 guard let field = raw.first else { continue }
                 let value = String(raw.dropFirst())
                 if field == "p" { currentPID = Int32(value) }
-                if field == "n", let currentPID, results[currentPID] == nil {
-                    results[currentPID] = value
+                if field == "n", let currentPID {
+                    results[currentPID, default: []].append(value)
                 }
             }
         }
@@ -733,9 +756,12 @@ public enum Scanner {
         }
     }
 
-    private static func findProject(_ cwd: String) -> ProjectMarker? {
+    /// `cwd` comes from lsof as an absolute, already-resolved path. Do not standardize it:
+    /// Foundation rewrites `/private/tmp` to `/tmp`, which then fails the `within(cwd, root)` check.
+    static func findProject(_ cwd: String) -> ProjectMarker? {
         guard cwd.hasPrefix("/"), cwd != "/" else { return nil }
-        var directory = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        var directory = cwd
+        while directory.count > 1, directory.hasSuffix("/") { directory.removeLast() }
         let markers = [
             ".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
             "Package.swift", "pubspec.yaml", "Gemfile", "mix.exs", "composer.json",

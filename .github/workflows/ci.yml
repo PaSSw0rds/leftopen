@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test release scripts
+        run: |
+          python3 -m unittest discover -s Tests/ReleaseTests
+          ruby Tests/HomebrewTests/uninstall_test.rb
+          brew ruby Tests/HomebrewTests/integration.rb
+      - name: Test Swift package
+        run: swift test
+      - name: Test legacy icon packaging
+        run: python3 Tests/test_legacy_app_icon.py
+      - name: Build app and CLI
+        run: zsh Scripts/build-app.sh
+        env:
+          LEFTOPEN_OUTPUT_DIR: dist/ci
+      - name: Test embedded Portless engine
+        run: |
+          case "$(uname -m)" in
+            arm64) node_arch=arm64 ;;
+            *) node_arch=x64 ;;
+          esac
+          .build/portless-runtime/node-${node_arch} --test Tests/PortlessTests/*.test.mjs

@@ -1,6 +1,26 @@
 import Combine
+import AppKit
 import Foundation
 import LeftOpenCore
+
+public enum AppearancePreference: String, CaseIterable, Identifiable {
+    case system, light, dark
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .system: L("System", "跟随系统")
+        case .light: L("Light", "浅色")
+        case .dark: L("Dark", "深色")
+        }
+    }
+    var nativeAppearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
+}
 
 /// The Settings choice; `.system` follows the Mac's preferred languages.
 public enum LanguagePreference: String, CaseIterable, Identifiable {
@@ -71,16 +91,23 @@ public final class AppSettings: ObservableObject {
     public static let shared = AppSettings()
 
     private enum Keys {
+        static let ignoredPorts = "leftopen.ignoredPorts"
         static let refreshInterval = "leftopen.refreshInterval"
         static let menuBarBadgeMode = "leftopen.menuBarBadgeMode"
         static let language = "leftopen.language"
+        static let appearance = "leftopen.appearance"
         static let checkForUpdates = "leftopen.checkForUpdates"
         static let safetyProtectionEnabled = "leftopen.safetyProtectionEnabled"
         static let soundEffectsEnabled = "leftopen.soundEffectsEnabled"
+        static let showProjectDock = "leftopen.showProjectDock"
         static let soundVolume = "leftopen.soundVolume"
     }
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+
+    @Published public var appearance: AppearancePreference {
+        didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
+    }
 
     @Published public var refreshInterval: RefreshInterval {
         didSet { defaults.set(refreshInterval.rawValue, forKey: Keys.refreshInterval) }
@@ -102,6 +129,10 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(soundEffectsEnabled, forKey: Keys.soundEffectsEnabled) }
     }
 
+    @Published public var showProjectDock: Bool {
+        didSet { defaults.set(showProjectDock, forKey: Keys.showProjectDock) }
+    }
+
     @Published public var soundVolume: Double {
         didSet { defaults.set(soundVolume, forKey: Keys.soundVolume) }
     }
@@ -112,12 +143,45 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(language.rawValue, forKey: Keys.language) }
     }
 
-    private init() {
+    @Published public private(set) var ignoredPorts: [Int] {
+        didSet { defaults.set(ignoredPorts, forKey: Keys.ignoredPorts) }
+    }
+
+    public func addIgnoredPort(_ port: Int) {
+        guard (1...65535).contains(port), !ignoredPorts.contains(port) else { return }
+        ignoredPorts = (ignoredPorts + [port]).sorted()
+    }
+
+    /// Parse the entire edit before saving so an invalid entry never drops existing ports.
+    @discardableResult
+    public func setIgnoredPorts(from text: String) -> Bool {
+        let tokens = text.split { $0 == "," || $0 == "，" || $0.isWhitespace }
+        var ports = Set<Int>()
+        for token in tokens {
+            guard token.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let port = Int(token), (1...65535).contains(port) else { return false }
+            ports.insert(port)
+        }
+        ignoredPorts = ports.sorted()
+        return true
+    }
+
+    public func removeIgnoredPort(_ port: Int) {
+        ignoredPorts.removeAll { $0 == port }
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        appearance = AppearancePreference(rawValue: defaults.string(forKey: Keys.appearance) ?? "system") ?? .system
+        ignoredPorts = Array(Set(defaults.array(forKey: Keys.ignoredPorts) as? [Int] ?? []))
+            .filter { (1...65535).contains($0) }.sorted()
         let storedInterval = defaults.object(forKey: Keys.refreshInterval) as? Int ?? RefreshInterval.minute1.rawValue
         self.refreshInterval = RefreshInterval(rawValue: storedInterval) ?? .minute1
 
         let storedBadge = defaults.string(forKey: Keys.menuBarBadgeMode) ?? MenuBarBadgeMode.closable.rawValue
         self.menuBarBadgeMode = MenuBarBadgeMode(rawValue: storedBadge) ?? .closable
+
+        self.showProjectDock = defaults.object(forKey: Keys.showProjectDock) as? Bool ?? true
 
         self.checkForUpdates = defaults.object(forKey: Keys.checkForUpdates) as? Bool ?? true
 

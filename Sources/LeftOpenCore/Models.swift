@@ -125,11 +125,18 @@ public struct Activity: Sendable, Equatable, Identifiable {
     public let applicationBundle: ApplicationBundle?
     public let scope: ListenerScope
     public var inference: OwnerInference
+    public var editorPreview: EditorPreview? = nil
     public var launchdJob: LaunchdJob? = nil
-    /// Set when a container runtime forwards this port and `docker ps` matched it to a container.
+    /// Set only when a verified local forwarder and TCP bind match one immutable container identity.
     public var container: ContainerInfo? = nil
 
     public var id: String { "\(listener.port):\(listener.pid)" }
+
+    /// Only verified previews split from other sockets owned by their shared host process.
+    public var listenerGroupID: String {
+        if editorPreview != nil { return "preview:" + id }
+        return "pid:\(process.pid):\(process.executablePath ?? process.command)"
+    }
 }
 
 public struct ScanSnapshot: Sendable {

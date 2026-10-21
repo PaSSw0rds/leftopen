@@ -9,6 +9,14 @@ verifies the final ZIP, publishes a Release with generated notes, and updates
 Homebrew's version and checksum. Notes can be edited on GitHub afterward.
 Runner availability and Apple notarization affect elapsed time.
 
+For a beta, set `prerelease` to true and choose `beta_number` (starting at 1).
+Version `0.5.3` with beta number `1` publishes `v0.5.3-beta.1`, explicitly marked
+as a prerelease and not Latest. Homebrew is skipped and the app's stable update
+checker remains on the previous stable release. The app/CLI version remains the
+numeric `0.5.3`; its increasing build number distinguishes beta builds. Download
+the beta from its explicit release page. Increase the beta number for a new beta;
+do not overwrite a published archive. Stable releases use the default inputs.
+
 ## One-time configuration
 
 In **Settings → Secrets and variables → Actions**, add these repository secrets:
@@ -55,6 +63,17 @@ app integration and an EdDSA-signed appcast, which can later be generated from
 the notarized ZIP in this workflow.
 
 ## Validation
+
+CI and release preflight execute the hardened Node runtime and bundled Portless
+on both native Intel and Apple Silicon runners. Intel Node alone receives
+`allow-unsigned-executable-memory`; the app and ARM Node do not. Both local and
+Developer ID builds use `Scripts/sign-portless-runtime.sh`. Runtime smoke tests
+also run after Developer ID signing and after extracting the final archive.
+They execute JavaScript, not just `node --version`, which skips V8 initialization.
+For a local cross-architecture check on Apple Silicon with Rosetta installed, run
+`python3 Scripts/verify-portless-runtime.py <app>/Contents/Resources/Portless --architecture x64`.
+These non-privileged checks do not install launchd services or alter certificate
+trust; the app's first-run authorization still needs interactive device testing.
 
 Run `python3 -m unittest discover -s Tests/ReleaseTests` for version validation
 and `actionlint .github/workflows/release.yml` for workflow checks. The first

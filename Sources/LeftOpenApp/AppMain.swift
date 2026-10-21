@@ -82,7 +82,7 @@ final class MenuModel: ObservableObject {
     @Published private(set) var closingActivityIDs: Set<String> = []
 
     private var refreshLoop: Task<Void, Never>?
-    private var scanLoop: Task<Void, Never>?
+    private var scanLoop: Task<ScanSnapshot?, Never>?
     private var rescanRequested = false
     private var settingsObserver: AnyCancellable?
     private var languageObserver: AnyCancellable?
@@ -91,10 +91,11 @@ final class MenuModel: ObservableObject {
 
     /// Hide a closing row optimistically until the follow-up scan confirms the result.
     var visible: ScanSnapshot {
-        guard !closingActivityIDs.isEmpty else { return snapshot }
+        let ignored = Set(AppSettings.shared.ignoredPorts)
+        guard !closingActivityIDs.isEmpty || !ignored.isEmpty else { return snapshot }
         return ScanSnapshot(
             activities: snapshot.activities.filter {
-                !closingActivityIDs.contains($0.id)
+                !closingActivityIDs.contains($0.id) && !ignored.contains($0.listener.port)
             },
             limitations: snapshot.limitations
         )
@@ -115,6 +116,7 @@ final class MenuModel: ObservableObject {
     var hasOpenDoors: Bool { closablePortCount > 0 }
 
     init() {
+        _ = FixedAddressManager.shared
         Task { await refresh() }
         scheduleRefresh(AppSettings.shared.refreshInterval)
         settingsObserver = AppSettings.shared.$refreshInterval
@@ -175,18 +177,23 @@ final class MenuModel: ObservableObject {
     /// scan loop: a request that arrives mid-scan queues a single rescan instead of a parallel one,
     /// so a refresh after a close never settles for a snapshot taken before the signal.
     func refresh() async {
+        _ = await refreshWithResult()
+    }
+
+    /// Nil means the requested fresh scan failed; the last displayed snapshot is not evidence.
+    private func refreshWithResult() async -> ScanSnapshot? {
         if let scanLoop {
             rescanRequested = true
-            await scanLoop.value
-            return
+            return await scanLoop.value
         }
         let loop = Task { await runScans() }
         scanLoop = loop
-        await loop.value
+        return await loop.value
     }
 
-    private func runScans() async {
+    private func runScans() async -> ScanSnapshot? {
         isRefreshing = true
+        var freshSnapshot: ScanSnapshot?
         defer {
             isRefreshing = false
             scanLoop = nil
@@ -195,6 +202,7 @@ final class MenuModel: ObservableObject {
             rescanRequested = false
             do {
                 snapshot = try await Task.detached(priority: .utility) { try Scanner.scan() }.value
+                freshSnapshot = snapshot
                 lastRefresh = Date()
                 if let offer = forceCloseOffer {
                     if !snapshot.activities.contains(where: {
@@ -204,20 +212,23 @@ final class MenuModel: ObservableObject {
                         notice = nil
                     }
                 }
+                let ignored = Set(AppSettings.shared.ignoredPorts)
                 let listeningPorts = Set(snapshot.activities.map(\.listener.port))
                 if let previousListeningPorts {
-                    if !listeningPorts.subtracting(previousListeningPorts).isEmpty {
+                    if !listeningPorts.subtracting(previousListeningPorts).subtracting(ignored).isEmpty {
                         DoorSound.doorOpen.play()
-                    } else if !previousListeningPorts.subtracting(listeningPorts).isEmpty {
+                    } else if !previousListeningPorts.subtracting(listeningPorts).subtracting(ignored).isEmpty {
                         DoorSound.doorClose.play()
                     }
                 }
                 previousListeningPorts = listeningPorts
             } catch {
+                freshSnapshot = nil
                 forceCloseOffer = nil
                 post(Notice(kind: .error, text: L("Scan failed: \(error.localizedDescription)", "扫描失败：\(error.localizedDescription)")))
             }
         } while rescanRequested
+        return freshSnapshot
     }
 
     func previewClose(_ activity: Activity) async {
@@ -246,53 +257,55 @@ final class MenuModel: ObservableObject {
         await execute(plan)
     }
 
-    /// The stop review is prepared like a close plan: the restart policy is fetched once, here,
-    /// instead of on every scan.
+    /// Freeze the daemon, immutable ID and all published bindings in a fresh, reviewed plan.
     func previewContainerStop(_ activity: Activity) async {
-        guard !isPreparingClose && !isClosing, let container = activity.container else { return }
+        guard !isPreparingClose && !isClosing, activity.container != nil else { return }
         isPreparingClose = true
         notice = nil
         defer { isPreparingClose = false }
-        let policy = await Task.detached(priority: .utility) {
-            ContainerResolver.restartPolicy(of: container)
-        }.value
-        pendingContainerStop = ContainerStopPlan(activity: activity, container: container,
-                                                 restartPolicy: policy)
+        do {
+            pendingContainerStop = try await Task.detached(priority: .utility) {
+                try ContainerResolver.prepareStop(activity)
+            }.value
+        } catch {
+            post(Notice(kind: .warning, text: L("Stop unavailable: \(error.localizedDescription)",
+                                               "无法停止：\(error.localizedDescription)")))
+        }
     }
 
     func confirmContainerStop() async {
         guard let plan = pendingContainerStop, !isClosing else { return }
         isClosing = true
         defer { isClosing = false }
-        // The ports this container owned before stopping; the refreshed scan tells which remain.
-        let containerPorts = Set(snapshot.activities.filter {
-            $0.container?.name == plan.container.name
-                || (plan.container.id.isEmpty == false && $0.container?.id == plan.container.id)
-        }.map(\.listener.port))
+        // Consume the confirmation once. The immutable plan, never the polling snapshot, supplies impact.
+        pendingContainerStop = nil
         do {
             _ = try await Task.detached(priority: .utility) {
-                try ContainerResolver.stop(plan.container)
+                try ContainerResolver.stop(plan)
             }.value
-            pendingContainerStop = nil
             selectedActivityID = nil
-            await refresh()
-            let stillForwarded = snapshot.activities.filter { containerPorts.contains($0.listener.port) }
+            let fresh = await refreshWithResult()
             let outcome: String
             let kind: NoticeKind
-            if stillForwarded.isEmpty {
-                outcome = L("Container \(plan.container.name) stopped; port \(plan.activity.listener.port) is free.",
-                            "容器 \(plan.container.name) 已停止，端口 \(plan.activity.listener.port) 已释放。")
+            switch ContainerStopVerification.evaluate(plan, freshSnapshot: fresh) {
+            case .free:
+                outcome = L("Container \(plan.container.name) stopped; TCP port \(plan.activity.listener.port) is free.",
+                            "容器 \(plan.container.name) 已停止，TCP 端口 \(plan.activity.listener.port) 已释放。")
                 kind = .success
-            } else {
-                let held = stillForwarded.map { String($0.listener.port) }.sorted().joined(separator: ", ")
-                outcome = L("Container \(plan.container.name) stopped, but \(held) still listen. Another container or the runtime may hold them.",
-                            "容器 \(plan.container.name) 已停止，但 \(held) 仍在监听，可能由其他容器或运行时占用。")
+            case let .stillListening(ports):
+                let held = ports.map(String.init).joined(separator: ", ")
+                outcome = L("Container \(plan.container.name) stopped, but TCP ports \(held) still listen. Another owner may hold them.",
+                            "容器 \(plan.container.name) 已停止，但 TCP 端口 \(held) 仍在监听，可能已由其他进程占用。")
+                kind = .warning
+            case .unavailable:
+                outcome = L("Container \(plan.container.name) stopped; verification unavailable because the fresh scan failed. Port release is not confirmed.",
+                            "容器 \(plan.container.name) 已停止，但最新扫描失败，无法验证端口是否已释放。")
                 kind = .warning
             }
             post(Notice(kind: kind, text: outcome))
         } catch {
-            let detail = error.localizedDescription
-            post(Notice(kind: .error, text: L("docker stop failed: \(detail)", "docker stop 失败：\(detail)")))
+            post(Notice(kind: .error, text: L("Container stop failed or was refused: \(error.localizedDescription)",
+                                             "容器停止失败或已拒绝：\(error.localizedDescription)")))
         }
     }
 
@@ -459,13 +472,16 @@ final class MenuModel: ObservableObject {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var appearanceObserver: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        appearanceObserver = AppSettings.shared.$appearance.sink { preference in
+            NSApp.appearance = preference.nativeAppearance
+        }
         MainActor.assumeIsolated { UpdateChecker.shared.start() }
     }
 }
 
-@main
 struct LeftOpenApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = MenuModel()

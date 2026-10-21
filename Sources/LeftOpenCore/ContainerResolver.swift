@@ -1,276 +1,468 @@
+import Darwin
 import Foundation
 import Network
 
-/// A host directory bind-mounted into a container (`docker run -v ~/code:/app`), the strongest
-/// hint of where a non-compose container was started from.
 public struct ContainerMount: Sendable, Equatable {
     public let source: String
     public let destination: String
 }
 
-/// The container behind a port a runtime forwards, resolved through the Engine API or `docker ps`.
+/// A runtime-specific, canonical local socket. Never derived from Docker's active context or
+/// DOCKER_HOST. Device/inode detect replacement of the socket between discovery and confirmation.
+public struct ContainerEndpoint: Sendable, Equatable, Hashable {
+    public let socketPath: String
+    public let device: UInt64
+    public let inode: UInt64
+    public var host: String { "unix://" + socketPath }
+}
+
+public struct ContainerPortBinding: Sendable, Equatable, Hashable {
+    public let address: String
+    public let hostPort: Int
+    public let containerPort: Int
+    public let transport: String
+
+    public var description: String { "\(address):\(hostPort) → \(containerPort)/\(transport)" }
+}
+
+/// Ownership evidence, including the exact daemon and full immutable container ID.
 public struct ContainerInfo: Sendable, Equatable {
     public let id: String
     public let name: String
     public let image: String
     public let composeProject: String?
-    /// Directory holding the compose file; `nil` for plain `docker run` containers.
     public let composeDir: String?
     public let mounts: [ContainerMount]
+    public let endpoint: ContainerEndpoint?
+    public let daemonID: String
+    public let bindings: Set<ContainerPortBinding>
 
     public init(id: String = "", name: String, image: String,
                 composeProject: String? = nil, composeDir: String? = nil,
-                mounts: [ContainerMount] = []) {
+                mounts: [ContainerMount] = [], endpoint: ContainerEndpoint? = nil,
+                daemonID: String = "", bindings: Set<ContainerPortBinding> = []) {
         self.id = id
         self.name = name
         self.image = image
         self.composeProject = composeProject
         self.composeDir = composeDir
         self.mounts = mounts
+        self.endpoint = endpoint
+        self.daemonID = daemonID
+        self.bindings = bindings
     }
 
-    /// The close that lasts: stopping the container, not the forwarder that merely maps its port.
-    public var stopCommand: String { "docker stop \(name)" }
-
-    /// Rows show a name a human chose. Docker's generated names (`nostalgic_turing`) say less than
-    /// the image does, so a plain `docker run` without `--name` is listed by its image.
+    public var identity: String { "\(endpoint?.host ?? "unverified")|\(daemonID)|\(id)" }
+    public var stopCommand: String {
+        guard let endpoint, Self.isFullID(id), !daemonID.isEmpty else {
+            return L("Container ownership is not verified", "尚未确认容器归属")
+        }
+        return "docker --host \(Self.shellQuote(endpoint.host)) stop \(id)"
+    }
+    public var restartDisableCommand: String {
+        guard let endpoint else { return "" }
+        return "docker --host \(Self.shellQuote(endpoint.host)) update --restart=no \(id)"
+    }
+    static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    static func isFullID(_ id: String) -> Bool {
+        id.count == 64 && id.allSatisfy { "0123456789abcdef".contains($0) }
+    }
     public var displayName: String {
         guard composeProject == nil, Self.isGeneratedName(name) else { return name }
         let last = (image as NSString).lastPathComponent
         if let colon = last.firstIndex(of: ":") { return String(last[..<colon]) }
         return last
     }
-
-    /// Docker invents names like `nostalgic_turing`: exactly two lowercase words and one underscore.
     static func isGeneratedName(_ name: String) -> Bool {
         let pieces = name.split(separator: "_")
-        guard pieces.count == 2 else { return false }
-        return pieces.allSatisfy { $0.allSatisfy(\.isLowercase) && $0.allSatisfy(\.isLetter) }
+        return pieces.count == 2 && pieces.allSatisfy { $0.allSatisfy(\.isLowercase) && $0.allSatisfy(\.isLetter) }
     }
 }
 
-/// What a stop review needs before asking the user to confirm: the plan is prepared on demand,
-/// never during the polling scan.
+/// A fresh inspection freezes all published protocols/addresses, restart policy and incarnation.
+struct ContainerInspection: Sendable, Equatable {
+    let container: ContainerInfo
+    let restartPolicy: String?
+    let maximumRetryCount: Int?
+    let startedAt: String
+    let imageID: String
+}
+
 public struct ContainerStopPlan: Sendable, Equatable {
     public let activity: Activity
     public let container: ContainerInfo
-    /// From `HostConfig.RestartPolicy`: an `always` container comes back when the Docker daemon
-    /// restarts even after `docker stop`. `nil` when the daemon would not say.
     public let restartPolicy: String?
+    public let reviewedBindings: Set<ContainerPortBinding>
+    /// Always contains the selected TCP port, even if later scans lose all container metadata.
+    public let reviewedTCPPorts: Set<Int>
+    let inspection: ContainerInspection
 
-    public init(activity: Activity, container: ContainerInfo, restartPolicy: String?) {
+    init(activity: Activity, inspection: ContainerInspection) {
         self.activity = activity
-        self.container = container
-        self.restartPolicy = restartPolicy
+        self.inspection = inspection
+        self.container = inspection.container
+        self.restartPolicy = inspection.restartPolicy
+        self.reviewedBindings = inspection.container.bindings
+        self.reviewedTCPPorts = Set(inspection.container.bindings.filter { $0.transport == "tcp" }.map(\.hostPort))
+            .union([activity.listener.port])
     }
-
     public var resurrectsOnDaemonRestart: Bool { restartPolicy == "always" }
 }
 
+public enum ContainerStopVerification: Equatable, Sendable {
+    case free
+    case stillListening([Int])
+    case unavailable
+
+    public static func evaluate(_ plan: ContainerStopPlan, freshSnapshot: ScanSnapshot?) -> Self {
+        guard let freshSnapshot else { return .unavailable }
+        // Intentionally conservative: a new owner on any address must never become "port free".
+        let remaining = Set(freshSnapshot.activities.map(\.listener.port)).intersection(plan.reviewedTCPPorts).sorted()
+        return remaining.isEmpty ? .free : .stillListening(remaining)
+    }
+}
+
 public enum ContainerResolver {
-    /// Skips the socket after a daemon failure, and the CLI after it failed too, so a hung daemon
-    /// costs one timeout per minute at most instead of one per scan.
-    private static let backoff = Backoff()
-    private static let retryDelay: TimeInterval = 60
-
-    private final class Backoff: @unchecked Sendable {
+    /// Injected per test; production shares a lock-protected, per-endpoint/transport backoff.
+    final class Backoff: @unchecked Sendable {
         private let lock = NSLock()
-        private var socketFailedAt: Date?
-        private var cliFailedAt: Date?
-
-        func socketBlocked(now: Date = Date()) -> Bool { isBlocked(&socketFailedAt, now: now) }
-        func cliBlocked(now: Date = Date()) -> Bool { isBlocked(&cliFailedAt, now: now) }
-        func markSocketFailure(_ date: Date = Date()) { mark(&socketFailedAt, date) }
-        func markCLIFailure(_ date: Date = Date()) { mark(&cliFailedAt, date) }
-
-        private func isBlocked(_ stamp: inout Date?, now: Date) -> Bool {
+        private var failures: [String: Date] = [:]
+        func blocked(_ key: String, now: Date) -> Bool {
             lock.lock(); defer { lock.unlock() }
-            guard let stamp else { return false }
-            return now.timeIntervalSince(stamp) < ContainerResolver.retryDelay
+            return failures[key].map { now.timeIntervalSince($0) < 60 } ?? false
         }
-
-        private func mark(_ stamp: inout Date?, _ date: Date) {
-            lock.lock(); defer { lock.unlock() }
-            stamp = date
+        func failed(_ key: String, now: Date) {
+            lock.lock(); defer { lock.unlock() }; failures[key] = now
+        }
+        func succeeded(_ key: String) {
+            lock.lock(); defer { lock.unlock() }; failures.removeValue(forKey: key)
         }
     }
+    private static let backoff = Backoff()
 
-    /// Resolves forwarded host ports to their containers once per scan. The Engine API over the
-    /// daemon's unix socket is tried first (~10 ms, no process spawn); the `docker ps` CLI, which
-    /// also understands contexts and remote daemons, is the fallback. Any failure simply leaves
-    /// the row naming the runtime instead.
-    public static func containers(for ports: Set<Int>) -> [Int: ContainerInfo] {
-        resolve(for: ports, socketFetch: fetchViaSocket, cliFetch: containersViaCLI)
-    }
-
-    /// The socket's failure backoff never gates the CLI fallback: skipping it is what turns a
-    /// half-second socket hiccup into a minute of rows losing their containers.
-    static func resolve(for ports: Set<Int>,
-                        socketFetch: (String) -> Data?,
-                        cliFetch: (Set<Int>) -> [Int: ContainerInfo]) -> [Int: ContainerInfo] {
-        guard !ports.isEmpty else { return [:] }
-        if !backoff.socketBlocked(), let socket = daemonSocket() {
-            if let body = socketFetch(socket), let parsed = parseEngineList(body, ports: ports) {
-                return parsed
-            }
-            backoff.markSocketFailure()
+    struct Dependencies {
+        var endpoint: (Activity) -> ContainerEndpoint? = { ContainerResolver.verifiedEndpoint(for: $0) }
+        var get: (ContainerEndpoint, String) -> Data? = { endpoint, path in
+            guard ContainerResolver.endpointIsCurrent(endpoint) else { return nil }
+            return UnixSocketHTTP.get(endpoint.socketPath, path: path, timeout: 2)
         }
-        return cliFetch(ports)
+        var command: (ContainerEndpoint, [String], TimeInterval) throws -> String = ContainerResolver.runDocker
     }
 
-    private static func fetchViaSocket(_ socket: String) -> Data? {
-        UnixSocketHTTP.get(socket, path: "/containers/json", timeout: 2)
-    }
-
-    /// Restart policy for the stop review, fetched once per action — the scan path never calls this.
-    public static func restartPolicy(of container: ContainerInfo) -> String? {
-        if !backoff.socketBlocked(), let socket = daemonSocket() {
-            if container.id.count == 12,
-               let body = UnixSocketHTTP.get(socket, path: "/containers/\(container.id)/json", timeout: 2),
-               let policy = parseRestartPolicy(body) {
-                return policy
-            }
-            backoff.markSocketFailure()
+    /// The listener itself must be a known forwarder; an app name or ancestor alone is not proof.
+    /// Unknown helpers/profiles remain runtime-only rows, with no Stop Container action.
+    static func socketCandidate(for activity: Activity, home: String = NSHomeDirectory()) -> String? {
+        guard activity.process.uid == Int32(getuid()), activity.editorPreview == nil,
+              let path = activity.process.executablePath else { return nil }
+        let name = (path as NSString).lastPathComponent
+        if name == "com.docker.backend", path.contains("/Docker.app/Contents/") {
+            return home + "/.docker/run/docker.sock"
         }
-        if let docker = dockerExecutable(), !backoff.cliBlocked(),
-           let output = try? CommandRunner.output(docker,
-               ["inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container.name],
-               timeout: 3) {
-            return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? nil : output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ["OrbStack", "OrbStack Helper", "OrbStack-helper", "orbstack-helper"].contains(name),
+           path.contains("/OrbStack.app/Contents/") {
+            return home + "/.orbstack/run/docker.sock"
+        }
+        // A profile-specific forwarder path is required. Generic lima/gvproxy ancestry cannot
+        // distinguish multiple local VMs and must not silently select the default Docker context.
+        let prefix = home + "/.colima/_lima/"
+        if path.hasPrefix(prefix), ["docker-proxy", "gvproxy"].contains(name),
+           let vm = path.dropFirst(prefix.count).split(separator: "/").first {
+            guard vm == "colima" || vm.hasPrefix("colima-") else { return nil }
+            let profile = vm == "colima" ? "default" : String(vm.dropFirst("colima-".count))
+            guard !profile.isEmpty, profile != ".", profile != "..",
+                  profile.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else { return nil }
+            return home + "/.colima/\(profile)/docker.sock"
         }
         return nil
     }
 
-    /// Stops the container through the CLI: a rare, user-confirmed write, which the CLI serves
-    /// with all its context and authentication handling. `docker stop` gives the container ~10 s
-    /// to exit gracefully, so the wait is generous.
-    public static func stop(_ container: ContainerInfo) throws -> String {
-        guard let docker = dockerExecutable() else {
-            throw CloseError(L("The `docker` command is not available on this Mac.", "这台 Mac 上没有 `docker` 命令。"))
+    static func verifiedEndpoint(for activity: Activity) -> ContainerEndpoint? {
+        guard let candidate = socketCandidate(for: activity) else { return nil }
+        let canonical = URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path
+        let home = NSHomeDirectory()
+        let allowedRoots: [String]
+        if candidate.contains("/.docker/") {
+            allowedRoots = [home + "/.docker/run/", home + "/Library/Containers/com.docker.docker/Data/"]
+        } else {
+            allowedRoots = [(candidate as NSString).deletingLastPathComponent + "/"]
         }
-        return try CommandRunner.output(docker, ["stop", container.name], timeout: 20)
+        guard allowedRoots.contains(where: canonical.hasPrefix) else { return nil }
+        var stats = stat()
+        guard stat(canonical, &stats) == 0, (stats.st_mode & S_IFMT) == S_IFSOCK else { return nil }
+        return ContainerEndpoint(socketPath: canonical, device: UInt64(UInt32(bitPattern: stats.st_dev)), inode: UInt64(stats.st_ino))
     }
 
-    // MARK: - Engine API
+    /// Check every IO operation as well as confirmation: a replaced socket/symlink is not the
+    /// endpoint that was reviewed, even if the replacement happens to expose similar containers.
+    static func endpointIsCurrent(_ endpoint: ContainerEndpoint) -> Bool {
+        guard URL(fileURLWithPath: endpoint.socketPath).resolvingSymlinksInPath().path == endpoint.socketPath else { return false }
+        var stats = stat()
+        return stat(endpoint.socketPath, &stats) == 0 && (stats.st_mode & S_IFMT) == S_IFSOCK
+            && UInt64(UInt32(bitPattern: stats.st_dev)) == endpoint.device && UInt64(stats.st_ino) == endpoint.inode
+    }
 
-    /// One `GET /containers/json` entry per container: names, image, structured port mappings,
-    /// compose labels and bind mounts — everything except the restart policy.
-    static func parseEngineList(_ data: Data, ports: Set<Int>) -> [Int: ContainerInfo]? {
-        guard let containers = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return nil
+    public static func containers(for activities: [Activity]) -> [String: ContainerInfo] {
+        resolve(activities, dependencies: Dependencies(), backoff: backoff, now: Date())
+    }
+
+    static func resolve(_ activities: [Activity], dependencies: Dependencies,
+                        backoff: Backoff, now: Date) -> [String: ContainerInfo] {
+        var grouped: [ContainerEndpoint: [Activity]] = [:]
+        for activity in activities {
+            guard let endpoint = dependencies.endpoint(activity) else { continue }
+            grouped[endpoint, default: []].append(activity)
         }
-        var resolved: [Int: ContainerInfo] = [:]
-        for container in containers {
-            guard let names = container["Names"] as? [String], let name = names.first else { continue }
-            let labels = container["Labels"] as? [String: String]
-            let info = ContainerInfo(
-                id: String((container["Id"] as? String ?? "").prefix(12)),
-                name: name.hasPrefix("/") ? String(name.dropFirst()) : name,
-                image: container["Image"] as? String ?? "",
-                composeProject: labels?["com.docker.compose.project"],
-                composeDir: composeDirectory(labels: labels),
-                mounts: (container["Mounts"] as? [[String: Any]] ?? []).compactMap { mount in
-                    guard let source = mount["Source"] as? String,
-                          let destination = mount["Destination"] as? String else { return nil }
-                    return ContainerMount(source: source, destination: destination)
-                })
-            for port in container["Ports"] as? [[String: Any]] ?? [] {
-                guard let publicPort = port["PublicPort"] as? Int,
-                      ports.contains(publicPort), resolved[publicPort] == nil else { continue }
-                resolved[publicPort] = info
+        var result: [String: ContainerInfo] = [:]
+        for (endpoint, members) in grouped {
+            let key = "\(endpoint.host)|\(endpoint.device)|\(endpoint.inode)"
+            var inventory: [ContainerInfo]?
+            if !backoff.blocked(key + ":socket", now: now) {
+                if let info = dependencies.get(endpoint, "/info"), let daemon = parseDaemonID(info),
+                   let data = dependencies.get(endpoint, "/containers/json"),
+                   let parsed = parseEngineList(data, endpoint: endpoint, daemonID: daemon) {
+                    inventory = parsed
+                    backoff.succeeded(key + ":socket")
+                } else {
+                    backoff.failed(key + ":socket", now: now)
+                }
+            }
+            if inventory == nil, !backoff.blocked(key + ":cli", now: now) {
+                inventory = try? cliInventory(endpoint, command: dependencies.command)
+                if inventory == nil { backoff.failed(key + ":cli", now: now) }
+                else { backoff.succeeded(key + ":cli") }
+            }
+            guard let inventory else { continue }
+            for activity in members {
+                if let owner = match(activity.listener, in: inventory) { result[activity.id] = owner }
             }
         }
-        return resolved
+        return result
     }
 
-    static func parseRestartPolicy(_ data: Data) -> String? {
-        guard let container = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hostConfig = container["HostConfig"] as? [String: Any],
-              let policy = hostConfig["RestartPolicy"] as? [String: Any],
-              let name = policy["Name"] as? String, !name.isEmpty else { return nil }
-        return name
+    /// Exact normalized TCP binds only. lsof's family-less `*` is accepted only for a wildcard
+    /// mapping, with one possible container on the entire port. Never pick a first match.
+    static func match(_ listener: Listener, in containers: [ContainerInfo]) -> ContainerInfo? {
+        guard !listener.addresses.isEmpty,
+              containers.allSatisfy({ ContainerInfo.isFullID($0.id) && $0.endpoint != nil && !$0.daemonID.isEmpty })
+        else { return nil }
+        var owners: [ContainerInfo] = []
+        for rawAddress in listener.addresses {
+            guard let address = normalizedAddress(rawAddress) else { return nil }
+            let candidates = containers.filter { container in
+                container.bindings.contains {
+                    $0.transport == "tcp" && $0.hostPort == listener.port
+                    && (address == "*" ? ["0.0.0.0", "::"].contains($0.address) : address == $0.address)
+                }
+            }
+            let allOnPort = containers.filter { $0.bindings.contains { $0.transport == "tcp" && $0.hostPort == listener.port } }
+            guard Set(candidates.map(\.identity)).count == 1, let owner = candidates.first,
+                  address != "*" || Set(allOnPort.map(\.identity)).count == 1 else { return nil }
+            owners.append(owner)
+        }
+        guard Set(owners.map(\.identity)).count == 1 else { return nil }
+        return owners.first
     }
 
-    /// The compose file's directory beats the label's `working_dir`, which is where compose was
-    /// invoked from (`-f` elsewhere is common enough to matter).
+    static func normalizedAddress(_ raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        if text == "*" { return text }
+        var v4 = in_addr()
+        var v6 = in6_addr()
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        if inet_pton(AF_INET, text, &v4) == 1, inet_ntop(AF_INET, &v4, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil {
+            return String(cString: buffer)
+        }
+        if inet_pton(AF_INET6, text, &v6) == 1, inet_ntop(AF_INET6, &v6, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil {
+            return String(cString: buffer)
+        }
+        return nil
+    }
+
+    static func parseDaemonID(_ data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = json["ID"] as? String, !id.isEmpty else { return nil }
+        return id
+    }
+
+    static func parseEngineList(_ data: Data, endpoint: ContainerEndpoint, daemonID: String) -> [ContainerInfo]? {
+        guard !daemonID.isEmpty,
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+        var result: [ContainerInfo] = []
+        for entry in entries {
+            guard let id = entry["Id"] as? String, ContainerInfo.isFullID(id),
+                  let names = entry["Names"] as? [String], let name = names.first,
+                  let ports = entry["Ports"] as? [[String: Any]] else { return nil }
+            var bindings: Set<ContainerPortBinding> = []
+            for port in ports {
+                guard let hostPort = port["PublicPort"] as? Int else { continue }
+                guard let address = port["IP"] as? String, let normalized = normalizedAddress(address), normalized != "*",
+                      let transport = port["Type"] as? String, ["tcp", "udp", "sctp"].contains(transport),
+                      let privatePort = port["PrivatePort"] as? Int,
+                      (1...65535).contains(hostPort), (1...65535).contains(privatePort) else { return nil }
+                bindings.insert(ContainerPortBinding(address: normalized, hostPort: hostPort,
+                                                      containerPort: privatePort, transport: transport))
+            }
+            result.append(makeInfo(entry, id: id, name: name, image: entry["Image"] as? String ?? "",
+                                   labels: entry["Labels"] as? [String: String], bindings: bindings,
+                                   endpoint: endpoint, daemonID: daemonID))
+        }
+        return result
+    }
+
+    static func parseInspection(_ entry: [String: Any], endpoint: ContainerEndpoint, daemonID: String) -> ContainerInspection? {
+        guard let id = entry["Id"] as? String, ContainerInfo.isFullID(id), !daemonID.isEmpty,
+              let name = entry["Name"] as? String,
+              let config = entry["Config"] as? [String: Any], let image = config["Image"] as? String,
+              let imageID = entry["Image"] as? String, !imageID.isEmpty,
+              let state = entry["State"] as? [String: Any], state["Running"] as? Bool == true,
+              let startedAt = state["StartedAt"] as? String, !startedAt.isEmpty,
+              let network = entry["NetworkSettings"] as? [String: Any],
+              let ports = network["Ports"] as? [String: Any] else { return nil }
+        var bindings: Set<ContainerPortBinding> = []
+        for (key, value) in ports {
+            let parts = key.split(separator: "/")
+            guard parts.count == 2, let privatePort = Int(parts[0]), (1...65535).contains(privatePort),
+                  ["tcp", "udp", "sctp"].contains(String(parts[1])) else { return nil }
+            if value is NSNull { continue }
+            guard let published = value as? [[String: String]] else { return nil }
+            for mapping in published {
+                guard let raw = mapping["HostIp"], let address = normalizedAddress(raw), address != "*",
+                      let host = mapping["HostPort"], let hostPort = Int(host), (1...65535).contains(hostPort) else { return nil }
+                bindings.insert(ContainerPortBinding(address: address, hostPort: hostPort,
+                                                      containerPort: privatePort, transport: String(parts[1])))
+            }
+        }
+        let host = entry["HostConfig"] as? [String: Any]
+        let policy = host?["RestartPolicy"] as? [String: Any]
+        let policyName = (policy?["Name"] as? String).flatMap {
+            ["no", "always", "unless-stopped", "on-failure"].contains($0) ? $0 : nil
+        }
+        let info = makeInfo(entry, id: id, name: name, image: image, labels: config["Labels"] as? [String: String],
+                            bindings: bindings, endpoint: endpoint, daemonID: daemonID)
+        return ContainerInspection(container: info, restartPolicy: policyName?.isEmpty == false ? policyName : nil,
+                                   maximumRetryCount: policy?["MaximumRetryCount"] as? Int, startedAt: startedAt, imageID: imageID)
+    }
+
+    private static func makeInfo(_ entry: [String: Any], id: String, name: String, image: String,
+                                 labels: [String: String]?, bindings: Set<ContainerPortBinding>,
+                                 endpoint: ContainerEndpoint, daemonID: String) -> ContainerInfo {
+        let mounts = (entry["Mounts"] as? [[String: Any]] ?? []).compactMap { mount -> ContainerMount? in
+            guard mount["Type"] as? String == "bind", let source = mount["Source"] as? String,
+                  let destination = mount["Destination"] as? String else { return nil }
+            return ContainerMount(source: source, destination: destination)
+        }.sorted { ($0.source, $0.destination) < ($1.source, $1.destination) }
+        return ContainerInfo(id: id, name: name.hasPrefix("/") ? String(name.dropFirst()) : name, image: image,
+                             composeProject: labels?["com.docker.compose.project"], composeDir: composeDirectory(labels: labels),
+                             mounts: mounts, endpoint: endpoint, daemonID: daemonID, bindings: bindings)
+    }
+
     static func composeDirectory(labels: [String: String]?) -> String? {
-        if let configFile = labels?["com.docker.compose.project.config_files"]?
-            .split(separator: ",").first.map(String.init) {
-            let dir = (configFile as NSString).deletingLastPathComponent
+        if let file = labels?["com.docker.compose.project.config_files"]?.split(separator: ",").first.map(String.init) {
+            let dir = (file as NSString).deletingLastPathComponent
             if !dir.isEmpty { return dir }
         }
         return labels?["com.docker.compose.project.working_dir"]
     }
 
-    /// `DOCKER_HOST` first (it is what the CLI would use), then the sockets the bundled runtimes
-    /// create. Colima's context socket is left to the CLI fallback, which reads `~/.docker/config.json`.
-    static func daemonSocket() -> String? {
-        if let host = ProcessInfo.processInfo.environment["DOCKER_HOST"],
-           host.hasPrefix("unix://"), let path = host.dropFirst("unix://".count).split(separator: ",").first {
-            let socket = String(path)
-            return isSocket(socket) ? socket : nil
+    private static func cliInventory(_ endpoint: ContainerEndpoint,
+                                     command: (ContainerEndpoint, [String], TimeInterval) throws -> String) throws -> [ContainerInfo] {
+        let daemon = try command(endpoint, ["info", "--format", "{{.ID}}"], 3).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !daemon.isEmpty else { throw unavailable() }
+        let ids = try command(endpoint, ["container", "ls", "--quiet", "--no-trunc"], 3)
+            .split(whereSeparator: \.isWhitespace).map(String.init)
+        guard ids.allSatisfy(ContainerInfo.isFullID), ids.count <= 256 else { throw unavailable() }
+        if ids.isEmpty { return [] }
+        let output = try command(endpoint, ["container", "inspect"] + ids, 3)
+        guard let entries = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [[String: Any]],
+              entries.count == ids.count else { throw unavailable() }
+        let inspections = entries.compactMap { parseInspection($0, endpoint: endpoint, daemonID: daemon) }
+        guard inspections.count == ids.count, Set(inspections.map { $0.container.id }) == Set(ids) else { throw unavailable() }
+        return inspections.map(\.container)
+    }
+
+    /// No action uses a current context or a mutable name. Clear inherited Docker overrides even
+    /// with --host, so DOCKER_CONTEXT/TLS/API-version settings cannot redirect or alter this call.
+    static func dockerEnvironment(_ environment: [String: String]) -> [String: String] {
+        environment.filter { !$0.key.hasPrefix("DOCKER_") }
+    }
+    static func runDocker(_ endpoint: ContainerEndpoint, _ arguments: [String], _ timeout: TimeInterval) throws -> String {
+        guard endpointIsCurrent(endpoint) else { throw unavailable() }
+        guard let docker = dockerExecutable() else {
+            throw CloseError(L("The `docker` command is not available on this Mac.", "这台 Mac 上没有 `docker` 命令。"))
         }
-        let home = NSHomeDirectory()
-        return [
-            home + "/.docker/run/docker.sock",     // Docker Desktop, user-owned
-            "/var/run/docker.sock",                // Docker Desktop and OrbStack symlink here
-            home + "/.orbstack/run/docker.sock",
-            home + "/.colima/docker.sock",
-        ].first { isSocket($0) }
+        return try CommandRunner.output(docker, ["--host", endpoint.host] + arguments, timeout: timeout,
+                                        environment: dockerEnvironment(ProcessInfo.processInfo.environment))
+    }
+    static func dockerExecutable() -> String? {
+        ["/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/usr/bin/docker", NSHomeDirectory() + "/.orbstack/bin/docker"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+    static func unavailable() -> CloseError {
+        CloseError(L("Local container ownership could not be verified. Refresh and review again; nothing was stopped.",
+                     "无法确认本机容器归属。请刷新后重新确认，未停止任何容器。"))
     }
 
-    private static func isSocket(_ path: String) -> Bool {
-        var stats = stat()
-        return stat(path, &stats) == 0 && (stats.st_mode & S_IFMT) == S_IFSOCK
-    }
-
-    // MARK: - CLI fallback
-
-    static func containersViaCLI(for ports: Set<Int>) -> [Int: ContainerInfo] {
-        guard !ports.isEmpty, !backoff.cliBlocked(), let docker = dockerExecutable() else { return [:] }
-        let output = try? CommandRunner.output(docker,
-            ["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}"], timeout: 3)
-        guard let output else {
-            backoff.markCLIFailure()
-            return [:]
-        }
-        return parse(output, ports: ports)
-    }
-
-    /// One `docker ps` row per line: name, image and the published mappings.
-    static func parse(_ output: String, ports: Set<Int>) -> [Int: ContainerInfo] {
-        var resolved: [Int: ContainerInfo] = [:]
-        for line in output.split(whereSeparator: \.isNewline) {
-            let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-            guard fields.count >= 3 else { continue }
-            for hostPort in publishedHostPorts(fields[2]) {
-                guard ports.contains(hostPort), resolved[hostPort] == nil else { continue }
-                resolved[hostPort] = ContainerInfo(name: fields[0], image: fields[1])
+    static func inspect(_ container: ContainerInfo, dependencies: Dependencies = Dependencies()) throws -> ContainerInspection {
+        guard let endpoint = container.endpoint, ContainerInfo.isFullID(container.id), !container.daemonID.isEmpty else { throw unavailable() }
+        if let info = dependencies.get(endpoint, "/info"), let daemon = parseDaemonID(info) {
+            guard daemon == container.daemonID else { throw unavailable() }
+            if let data = dependencies.get(endpoint, "/containers/\(container.id)/json"),
+               let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let inspection = parseInspection(entry, endpoint: endpoint, daemonID: daemon) {
+                guard inspection.container.id == container.id else { throw unavailable() }
+                return inspection
             }
         }
-        return resolved
+        let daemon = try dependencies.command(endpoint, ["info", "--format", "{{.ID}}"], 3).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard daemon == container.daemonID else { throw unavailable() }
+        let output = try dependencies.command(endpoint, ["container", "inspect", container.id], 3)
+        guard let entries = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [[String: Any]], entries.count == 1,
+              let inspection = parseInspection(entries[0], endpoint: endpoint, daemonID: daemon),
+              inspection.container.id == container.id else { throw unavailable() }
+        return inspection
     }
 
-    /// `docker ps` renders mappings like `0.0.0.0:5432->5432/tcp, :::8080->80/tcp`; the host port is
-    /// the number left of `->`. Empty string when a container publishes nothing.
-    static func publishedHostPorts(_ portList: String) -> [Int] {
-        portList.split(separator: ",").compactMap { mapping in
-            let mapping = mapping.trimmingCharacters(in: .whitespaces)
-            guard let arrow = mapping.range(of: "->") else { return nil }
-            let hostSide = mapping[..<arrow.lowerBound]
-            guard let colon = hostSide.lastIndex(of: ":") else { return nil }
-            return Int(hostSide[hostSide.index(after: colon)...])
+    public static func prepareStop(_ activity: Activity) throws -> ContainerStopPlan {
+        let snapshot = try Scanner.scan()
+        guard let old = activity.container, let fresh = snapshot.activities.first(where: { $0.id == activity.id }),
+              let owner = fresh.container, owner.identity == old.identity, owner.endpoint == old.endpoint,
+              fresh.listener == activity.listener else { throw unavailable() }
+        return try makePlan(activity: fresh, inspection: inspect(owner))
+    }
+    static func makePlan(activity: Activity, inspection: ContainerInspection) throws -> ContainerStopPlan {
+        guard let selected = activity.container, selected.identity == inspection.container.identity,
+              selected.endpoint == inspection.container.endpoint,
+              match(activity.listener, in: [inspection.container])?.identity == selected.identity else { throw unavailable() }
+        return ContainerStopPlan(activity: activity, inspection: inspection)
+    }
+
+    public static func stop(_ plan: ContainerStopPlan) throws -> String {
+        try execute(plan, scan: Scanner.scan, inspect: { try inspect($0) },
+                    endpoint: { verifiedEndpoint(for: $0) }, command: runDocker,
+                    checkCancellation: { try Task.checkCancellation() })
+    }
+    static func execute(_ plan: ContainerStopPlan, scan: () throws -> ScanSnapshot,
+                        inspect: (ContainerInfo) throws -> ContainerInspection,
+                        endpoint: (Activity) -> ContainerEndpoint?,
+                        command: (ContainerEndpoint, [String], TimeInterval) throws -> String,
+                        checkCancellation: () throws -> Void) throws -> String {
+        try checkCancellation()
+        guard ContainerInfo.isFullID(plan.container.id), !plan.container.daemonID.isEmpty else { throw unavailable() }
+        let fresh = try scan()
+        guard let activity = fresh.activities.first(where: { $0.id == plan.activity.id }),
+              activity.listener == plan.activity.listener,
+              activity.process.executablePath == plan.activity.process.executablePath,
+              activity.process.uid == plan.activity.process.uid,
+              activity.container?.identity == plan.container.identity,
+              let pinned = plan.container.endpoint, endpoint(activity) == pinned else { throw unavailable() }
+        // Fresh inspection is deliberately after the fresh scan and immediately before the write.
+        let current = try inspect(plan.container)
+        guard current == plan.inspection else {
+            throw CloseError(L("The container or its impact changed. Review it again; nothing was stopped.",
+                               "容器或影响范围已改变。请重新确认，未停止任何容器。"))
         }
-    }
-
-    static func dockerExecutable() -> String? {
-        [
-            "/usr/local/bin/docker",                   // Docker Desktop's symlink, Intel Homebrew
-            "/opt/homebrew/bin/docker",                // Apple Silicon Homebrew
-            "/usr/bin/docker",
-            NSHomeDirectory() + "/.orbstack/bin/docker",
-        ].first { FileManager.default.isExecutableFile(atPath: $0) }
+        try checkCancellation()
+        return try command(pinned, ["stop", plan.container.id], 20)
     }
 }
 

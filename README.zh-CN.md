@@ -18,8 +18,8 @@
 
   <br />
   <picture>
-    <source srcset="assets/preview-dark.png" media="(prefers-color-scheme: dark)">
-    <img src="assets/preview.png" alt="LeftOpen 菜单栏面板：可关闭的端口排在前面，系统服务与 app 折叠收起" width="375" />
+    <source srcset="assets/preview-zh-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="assets/preview-zh.png" alt="LeftOpen 菜单栏面板：可关闭的端口排在前面，系统服务与 app 折叠收起" width="375" />
   </picture>
   <br /><br />
 </div>
@@ -33,6 +33,8 @@
 > *把那些虚掩着的门，轻轻关上。*
 
 ---
+
+> 这个项目正在快速迭代，并将永久免费开源。如果你已经下载或正在使用，欢迎 **Star** 收藏项目，并 [**Follow @SonghaiFan**](https://github.com/SonghaiFan) 关注后续项目动态。你的 Star 是对我最大的支持，也是我持续开发的最大动力。
 
 ## 安装
 
@@ -57,8 +59,33 @@ brew install --cask songhaifan/tap/leftopen
 - **按来历分组。** 开发服务器（从项目、终端、编辑器或 agent 启动）、后台服务（由 launchd 管理：brew services、登录项）、容器（由 Docker Desktop、OrbStack、colima 转发，通过 Engine API 解析出容器名、compose 项目和挂载目录）、App 和系统。分组即关闭方式，每组都写明：开发服务器发 SIGTERM，launchd 会重启的服务提示 `brew services stop …`，容器可在详情页一键 `docker stop`，App 的端口需要退出 App。
 - **先轻轻关闭。** 发送 `SIGTERM`，关闭前重新核对进程身份。单独关闭一个进程后等待五秒，如果仍在监听，该进程会显示失败提示；警告会说明两分钟内再次点击或右滑关闭将发送 `SIGKILL`。第二次关闭操作就是明确的强制关闭，原有安全保护和身份核验仍然生效。
 - **本机还是局域网。** 区分绑在 `127.0.0.1` 的端口和绑在 `0.0.0.0` / 局域网地址上的端口。
-- **没有后台常驻。** 原生 SwiftUI `MenuBarExtra`。无守护进程，无 Dock 图标，无遥测。唯一离开这台 Mac 的网络请求是每天向 GitHub 查询一次最新版本，可在设置中关闭。
+- **隐藏端口。** 在 **设置 → 端口 → 隐藏端口** 中添加端口，或右键选择 **隐藏端口**，即可从列表、搜索、菜单栏计数和变化提示音中排除。输入端口后按回车或逗号添加，也可一次粘贴多个端口。已保存的端口显示为标签，点击 × 后恢复显示。服务仍继续运行。
+- **外观。** 在 **设置 → 通用** 中选择跟随系统、浅色或深色，同页提供语言、登录启动与声音设置。**项目** 页显示本地地址服务的健康状态。
+- **默认安静。** 原生 SwiftUI `MenuBarExtra`。无 Dock 图标，无遥测；除非启用固定地址，否则没有后台服务。唯一离开这台 Mac 的网络请求是每天向 GitHub 查询一次最新版本，可在设置中关闭。
+- **固定项目地址。** 为开发服务器分配稳定的 `https://myapp.localhost`，端口变化后自动跟随，由内置的 [Portless](https://github.com/vercel-labs/portless) 提供。详见[下文](#固定项目地址)。
 - **终端里是同一个引擎。** App 附带 `leftopen` 命令行工具，推断和安全规则完全一致。
+
+停止容器仅适用于已验证的本机运行时端点；归属不明确时只展示，不提供停止操作。详见 [容器安全机制](docs/container-stop-safety.md)。
+
+---
+
+## 固定项目地址
+
+开发服务器的端口会变，地址可以不变。LeftOpen 内置 [Portless](https://github.com/vercel-labs/portless) 0.15.7 和 Node 24.14.0，无需另外安装。
+
+1. **首次设置：** 开启 **设置 → 项目 → 固定地址**。macOS 会请求授权，用于信任本地 CA、在所选代理端口（默认 443）安装只监听本机的 HTTPS 服务，并管理精确的 `/etc/hosts` 条目。只有设置页的明确操作会请求授权；项目操作和后台扫描都不会。
+2. **每个项目：** 照常启动项目，在端口详情点击 **启用固定地址**，即可通过 `https://myapp.localhost` 访问。
+
+工作方式：
+
+- **确认后才转发。** 跟随端口变化前，核对项目目录、可执行文件、工作目录、参数摘要和当前监听进程。归属不明确或无关的监听者、仅 HTTPS 的上游和非 Web 端口不会被转发。开发服务器拒绝新主机名时在详情中显示原因，不修改项目文件。
+- **启动已停止的项目。** 已保存但未运行的项目有开发脚本时显示 **启动**，使用 Portless 自身的启动器（分配空闲端口、适配框架参数、区分 worktree）。没有开发脚本的项目可在 `.claude/launch.json` 中声明启动命令（`runtimeExecutable`、`runtimeArgs`、`port`），仅在你点击 **启动** 时通过 `portless run` 运行，不经过 shell。`portless.json` 和 `package.json` 的 `"portless"` 字段由 Portless 自身读取。不从进程参数猜启动命令；两者都没有的项目可右键快捷方式选择 **复制给 AI 的设置提示词**，粘贴给编程 agent 来创建 `.claude/launch.json`。
+- **短期租约，而非永久规则。** 扫描到的服务使用短期映射，LeftOpen 停止扫描后失效，下次打开时恢复。停用地址不会停止项目。HTTPS 服务在退出 App 后仍保留；443 已被占用时显示原因，不抢占。
+- **供 Agent 与脚本使用：** `leftopen url [名称|端口|路径]` 输出已确认的地址（加 `--json` 获取结构化结果），`leftopen --json` 为对应服务增加 `fixedURL`。
+
+已有的 HTTP 地址继续可用，可在同一设置页完成 HTTPS 升级。Portless（Apache-2.0）与 Node 随附各自的许可证。
+
+**固定地址设置：** 在「设置 → 项目」一行开启或关闭固定地址，无需手动配置端口。首次设置优先使用 443；冲突时在同一次授权中尝试 8443–8462，成功后记住端口，打开和复制的地址会自动带上它。不会终止其他占用者；无法安全安装时保留错误和可复制诊断。通过 LeftOpen 启动的项目运行时不自动迁移端口。关闭固定地址会撤下路由，保留绑定、证书和代理，不关闭项目服务器；通过 LeftOpen 启动的项目需先停止。
 
 ---
 
@@ -84,6 +111,9 @@ leftopen 3000
 
 # 在默认浏览器打开 http://localhost:3000
 leftopen open 3000
+
+# 输出项目已确认的固定地址（如 https://myapp.localhost）
+leftopen url myapp
 
 # 安全关闭指定端口（SIGTERM，先确认）
 leftopen close 3000
@@ -124,12 +154,27 @@ LOCAL = this Mac only · LAN = may be reachable from your local network
 # 运行测试
 swift test
 
-# 本地编译 App
-LEFTOPEN_OUTPUT_DIR=dist/dev Scripts/build-app.sh
+# 构建唯一的本地测试 App（.build/local-app.noindex）
+Scripts/build-app.sh
+
+# 构建、运行，退出后自动清理
+python3 Scripts/dev-app.py run
+
+# 清理仅构建、尚未运行的测试 App
+python3 Scripts/dev-app.py clean
 ```
+
+本地构建名为 **LeftOpen Test**，使用独立 bundle ID，不会安装到 `/Applications`。清理只处理脚本管理的输出目录，发现 App 或内置进程仍在运行时会拒绝删除，请先退出测试版。固定地址服务和其他用户数据不会被重置。CI 与正式打包继续显式指定 `LEFTOPEN_OUTPUT_DIR`；日常测试请勿再生成多个 `dist/` 版本目录。
 
 ---
 
 ## 许可证
 
 [MIT License](LICENSE)
+
+## 卸载
+
+完整卸载请使用 **LeftOpen → 设置 → 关于 → 卸载 LeftOpen…**。
+直接运行 `brew uninstall` 只移除应用和 CLI，可能留下后台服务、证书和配置。
+如果已删除应用，请重新安装后使用应用内卸载功能。
+详见[完整卸载说明](docs/uninstall.md)。
